@@ -1,0 +1,54 @@
+{
+  "_comment": "Copy to ~/.config/sleet/config.json and adjust. Field values are display labels, case-sensitive.",
+  "instance": "yourinstance",
+  "detail_fields": [
+    [
+      "u_example_field",
+      "Example label"
+    ]
+  ],
+  "presets": {
+    "resolve": {
+      "_comment": "sleet INC... -r \"close notes\"",
+      "tables": [
+        "incident"
+      ],
+      "fields": {
+        "state": "Resolved",
+        "close_code": "Solved (Permanently)"
+      },
+      "notes_field": "close_notes"
+    },
+    "review": {
+      "_comment": "sleet CHG... --review \"close notes\" --hours 4",
+      "tables": [
+        "change_request"
+      ],
+      "fields": {
+        "state": "Review",
+        "close_code": "Successful"
+      },
+      "notes_field": "close_notes",
+      "hours_field": "u_example_hours",
+      "require_hours": false
+    }
+  },
+  "templates": {
+    "_comment": "sleet --new inc -t \"title\" [--desc ...] [--set ...]; values are display labels",
+    "inc": {
+      "table": "incident",
+      "fields": {
+        "impact": "3 - Low",
+        "urgency": "3 - Low",
+        "assignment_group": "Your Team"
+      }
+    },
+    "chg": {
+      "table": "change_request",
+      "fields": {
+        "type": "Normal",
+        "assignment_group": "Your Team"
+      }
+    }
+  }
+}

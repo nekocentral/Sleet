@@ -1,0 +1,8 @@
+[
+  {"label": "INC",     "table": "incident",       "query": "assigned_to=javascript:gs.getUserID()^active=true^state!=6"},
+  {"label": "INCTask", "table": "incident_task",  "query": "assigned_to=javascript:gs.getUserID()^active=true"},
+  {"label": "PRB",     "table": "problem",        "query": "assigned_to=javascript:gs.getUserID()^active=true"},
+  {"label": "PRBTask", "table": "problem_task",   "query": "assigned_to=javascript:gs.getUserID()^active=true"},
+  {"label": "CHG",     "table": "change_request", "query": "assigned_to=javascript:gs.getUserID()^active=true"},
+  {"label": "CHGTask", "table": "change_task",    "query": "assigned_to=javascript:gs.getUserID()^active=true"}
+]
