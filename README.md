@@ -78,7 +78,7 @@ Every write shows a preview and asks for confirmation. Press `v` to view the ful
 sleet INC0012345 -m "Work note, internal"
 sleet INC0012345 --comment "Customer-visible comment"
 sleet INC0012345 --set state="In Progress" --assign me
-sleet INC0012345 --assign "Full Name"
+sleet INC0012345 --assign "Full Name"           # or a user name or email
 some_command | sleet INC0012345 -m -            # stdin into a work note
 sleet INC0012345 -r "Close notes"               # preset "resolve"
 sleet CHG0012345 --review "Close notes" --hours 4
@@ -97,6 +97,10 @@ echo "details" | sleet --new inc -t "Title" --desc -
 
 Templates hold the fields you always set, such as caller, group, category and impact. `-m`, `--comment`, `--set` and `--assign` work as for updates and override template values. The new number is printed as a link. If ServiceNow refuses the record, `sleet` prints its error, which usually names the missing mandatory field.
 
+`--assign` looks the user up by full name, user name or email. If a name matches more than one active user, `sleet` lists them and stops, so you can pass the user name or email instead.
+
+If a write times out or the connection drops, `sleet` can't tell whether ServiceNow applied it. It says so, and you should check the ticket before you retry.
+
 `--set` takes the technical field name and the *display value* exactly as the form shows it. Labels are case-sensitive. To find a field name, right-click its label on the classic form.
 
 ## Configure
@@ -107,6 +111,7 @@ All configuration lives in `~/.config/sleet/` (or `$XDG_CONFIG_HOME/sleet/`):
 | --- | --- |
 | `config.json` | Instance, presets, templates for `--new`, extra fields for the detail view |
 | `cookie` | Your session. Treat it as a password. |
+| `token` | The session token, cached by `sleet` so commands start faster. Treat it as a password. |
 | `sections.json` | Optional: custom board sections, one encoded query each |
 
 ### Presets
@@ -122,6 +127,14 @@ A preset is a named set of field values plus a notes field. `-r` and `--review` 
 | `require_hours` | When `true`, the preset refuses to run without `--hours` |
 
 Any `--set` in the same command overrides a preset value.
+
+### Other settings
+
+| Key | Meaning |
+| --- | --- |
+| `detail_fields` | Extra fields for the ticket view, as `[field, label]` pairs |
+| `hours_field` | The default field for `--hours` when the preset doesn't name one |
+| `done_states` | State labels that count as done and are hidden without `-a`. Set this when your instance isn't in English, for example `["Opgelost", "Gesloten"]` |
 
 ### Board sections
 
@@ -139,7 +152,8 @@ Without `sections.json`, the board groups tickets by type. With it, every sectio
 
 - Keep `~/.config/sleet/cookie` private (`chmod 600`). Anyone who has it can act as you until the session expires.
 - Writes go to production under your name. Don't use `-y` in scripts that touch many tickets.
-- Never commit `cookie`, `config.json` or `sections.json`. The `.gitignore` excludes them.
+- Never commit `cookie`, `token`, `config.json` or `sections.json`. The `.gitignore` excludes them.
+- Ticket text is shown with control characters removed, so a ticket can't send escape sequences to your terminal. This also applies to `-j` output.
 
 ## License
 

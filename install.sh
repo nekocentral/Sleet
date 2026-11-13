@@ -10,10 +10,13 @@ python3 -m venv "$VENV"
 "$VENV/bin/pip" install -q --upgrade requests
 mkdir -p "$BIN" "$CONF" && chmod 700 "$CONF"
 
-cat > "$BIN/sleet" << LAUNCH
-#!/usr/bin/env bash
-exec "$VENV/bin/python" "$SRC/sleet.py" "\$@"
-LAUNCH
+# only replace a launcher this script wrote earlier, never some other "sleet"
+if [ -e "$BIN/sleet" ] && ! grep -q 'sleet\.py' "$BIN/sleet"; then
+  echo "$BIN/sleet exists and is not a sleet launcher; remove it or pass another directory" >&2
+  exit 1
+fi
+# %q keeps paths with spaces, quotes or \$ intact
+printf '#!/usr/bin/env bash\nexec %q %q "$@"\n' "$VENV/bin/python" "$SRC/sleet.py" > "$BIN/sleet"
 chmod +x "$BIN/sleet"
 
 [ -f "$CONF/config.json" ] || cp "$SRC/config.example.json" "$CONF/config.json"

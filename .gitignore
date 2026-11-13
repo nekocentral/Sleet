@@ -1,6 +1,7 @@
 # never commit sessions or personal config
 cookie
 .sn_cookie
+token
 config.json
 sections.json
 .venv/
