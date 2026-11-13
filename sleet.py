@@ -3,26 +3,30 @@
 
 Config:   ~/.config/sleet/config.json    (instance, presets, extra detail fields)
 Cookie:   ~/.config/sleet/cookie         (browser Cookie header, chmod 600)
+Token:    ~/.config/sleet/token          (cached session token, written by sleet)
 Board:    ~/.config/sleet/sections.json  (optional, dashboard-style sections)
 """
 import argparse
+import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import webbrowser
+from urllib.parse import quote
 
 import requests
 
-__version__ = "0.1.0"
-from urllib.parse import quote
+__version__ = "0.1.1"
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "sleet")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 COOKIE_FILE = os.path.join(CONFIG_DIR, "cookie")
 SECTIONS_FILE = os.path.join(CONFIG_DIR, "sections.json")
+TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
 
 
 def load_config():
@@ -44,8 +48,11 @@ MY_GROUPS = "javascript:getMyGroups()"
 
 TASK_FIELDS = "sys_id,number,sys_class_name,short_description,state,priority,sys_updated_on"
 CHG_FIELDS = "sys_id,number,type,state,risk,approval,start_date,end_date,short_description"
-DONE = {"Resolved", "Closed", "Cancelled", "Canceled",
-        "Closed Complete", "Closed Incomplete", "Closed Skipped"}
+# state labels hidden unless -a; override with "done_states" in config.json (e.g. non-English instances)
+DONE = set(CFG.get("done_states") or ["Resolved", "Closed", "Cancelled", "Canceled",
+                                      "Closed Complete", "Closed Incomplete", "Closed Skipped"])
+PAGE = 500          # rows per request
+MAX_ROWS = 5000     # stop paging here and say so
 
 # (label, short tag, sys_class_name) - anything not listed lands in "Other"
 SECTIONS = [
@@ -73,43 +80,147 @@ def die(msg):
     sys.exit(f"[sleet] {msg}")
 
 
-def session():
+# control characters (incl. ESC) and bidi overrides: ticket text is untrusted, never let it drive the terminal
+UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def clean(v):
+    return UNSAFE.sub("", v) if isinstance(v, str) else v
+
+
+def read_cookie():
     try:
-        raw = open(COOKIE_FILE).read().strip()
+        mode = os.stat(COOKIE_FILE).st_mode
+        with open(COOKIE_FILE) as f:
+            raw = f.read().strip()
     except FileNotFoundError:
         die(f"no cookie file at {COOKIE_FILE} - paste your browser Cookie header there (chmod 600)")
-    s = requests.Session()
-    s.headers.update({"Cookie": raw, "Accept": "application/json"})
-    if os.environ.get("SLEET_GCK"):
-        s.headers["X-UserToken"] = os.environ["SLEET_GCK"]
-        return s
+    if mode & 0o077:
+        print(f"[sleet] warning: {COOKIE_FILE} is readable by others - run: chmod 600 {COOKIE_FILE}",
+              file=sys.stderr)
+    if raw.lower().startswith("cookie:"):                # pasted with the header name
+        raw = raw[len("cookie:"):].strip()
+    if not raw or "\n" in raw or "\r" in raw:
+        die(f"{COOKIE_FILE} must hold exactly one line: the value of the Cookie request header")
+    return raw
+
+
+def cached_token(key):
+    try:
+        with open(TOKEN_FILE) as f:
+            d = json.load(f)
+        return d["g_ck"] if d.get("key") == key and isinstance(d["g_ck"], str) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def save_token(key, token):
+    try:
+        fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"key": key, "g_ck": token}, f)
+        os.chmod(TOKEN_FILE, 0o600)
+    except OSError:
+        pass                                             # the cache is only a speed-up
+
+
+def forget_token():
+    try:
+        os.remove(TOKEN_FILE)
+    except OSError:
+        pass
+
+
+def fetch_token(s):
+    """Read g_ck from a page of the web UI; this is also the check that the session is alive."""
     r = s.get(f"{BASE}/incident_list.do", allow_redirects=False, timeout=30)
-    if r.status_code in (301, 302):
+    if 300 <= r.status_code < 400 or r.status_code == 401:
+        forget_token()
         die(f"session expired - refresh {COOKIE_FILE}")
     m = re.search(r"g_ck\s*=\s*['\"]([a-f0-9]+)['\"]", r.text)
     if not m:
         die("g_ck not found - grab it from DevTools console and set SLEET_GCK")
     s.headers["X-UserToken"] = m.group(1)
+    save_token(s.token_key, m.group(1))
+
+
+def session():
+    raw = read_cookie()
+    s = requests.Session()
+    s.headers.update({"Cookie": raw, "Accept": "application/json"})
+    s.token_key = hashlib.sha256(f"{INSTANCE}\n{raw}".encode()).hexdigest()   # ties the cache to this session
+    s.token_cached = False
+    if os.environ.get("SLEET_GCK"):
+        s.headers["X-UserToken"] = os.environ["SLEET_GCK"]
+        return s
+    token = cached_token(s.token_key)
+    if token:
+        s.headers["X-UserToken"] = token
+        s.token_cached = True
+    else:
+        fetch_token(s)
     return s
 
 
+def api_error(r):
+    try:
+        err = r.json().get("error", {})
+        return clean(f"{err.get('message', '')} {err.get('detail') or ''}".strip())
+    except (ValueError, AttributeError):
+        return clean(r.text[:300])
+
+
+def call(s, method, path, **kw):
+    """One API request. Never follows redirects (they lead to the SSO page and would carry the
+    token along), turns every failure into a one-line message, and returns the "result"."""
+    write = method != "GET"
+    unsure = "it may or may not have been applied - check the ticket before you retry"
+    while True:
+        try:
+            r = s.request(method, f"{BASE}{path}", timeout=60, allow_redirects=False, **kw)
+        except requests.exceptions.RequestException as e:
+            if write:
+                die(f"{e.__class__.__name__} during the write: {unsure}")
+            raise
+        if r.status_code == 401 and s.token_cached:      # cached token gone stale: fetch a fresh one, once
+            s.token_cached = False
+            fetch_token(s)
+            continue
+        break
+    if r.status_code == 401 or 300 <= r.status_code < 400:
+        forget_token()
+        die(f"{r.status_code} - session expired or token rejected, refresh {COOKIE_FILE}")
+    if r.status_code >= 400:
+        die(f"{r.status_code} - {'not written' if write else 'request refused'}: {api_error(r)}")
+    try:
+        return r.json()["result"]
+    except (ValueError, KeyError, TypeError):
+        if write:
+            die(f"unreadable response to the write ({r.status_code}): {unsure}")
+        die(f"unexpected response from {BASE} (not JSON) - is the session still valid? refresh {COOKIE_FILE}")
+
+
 def get(s, table, query, fields):
-    r = s.get(f"{BASE}/api/now/table/{table}", timeout=60, params={
-        "sysparm_query": query,
-        "sysparm_fields": fields,
-        "sysparm_display_value": "all",
-        "sysparm_exclude_reference_link": "true",
-        "sysparm_limit": "500",
-    })
-    if r.status_code == 401:
-        die(f"401 - session expired or token rejected, refresh {COOKIE_FILE}")
-    r.raise_for_status()
     out = []
-    for row in r.json()["result"]:
-        d = {k: (v.get("display_value") if isinstance(v, dict) else v) or "" for k, v in row.items()}
-        d["_raw"] = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in row.items()}
-        out.append(d)
-    return out
+    while True:
+        page = call(s, "GET", f"/api/now/table/{table}", params={
+            "sysparm_query": query,
+            "sysparm_fields": fields,
+            "sysparm_display_value": "all",
+            "sysparm_exclude_reference_link": "true",
+            "sysparm_limit": str(PAGE),
+            "sysparm_offset": str(len(out)),
+        })
+        for row in page:
+            d = {k: clean(v.get("display_value") if isinstance(v, dict) else v) or "" for k, v in row.items()}
+            d["_raw"] = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in row.items()}
+            out.append(d)
+        if len(page) < PAGE:
+            return out
+        if len(out) >= MAX_ROWS:
+            print(f"[sleet] warning: {table} has more than {MAX_ROWS} matches, showing the first {len(out)}",
+                  file=sys.stderr)
+            return out
 
 
 def fetch_tasks(s, a):
@@ -203,7 +314,8 @@ LINE_FIELDS = "sys_id,number,short_description,state,priority,sys_updated_on"
 def config_board(s, a):
     """Board driven by encoded queries copied from the dashboard tiles."""
     try:
-        cfg = json.load(open(SECTIONS_FILE))
+        with open(SECTIONS_FILE) as f:
+            cfg = json.load(f)
     except json.JSONDecodeError as e:
         die(f"{SECTIONS_FILE}: {e}")
     results = [(sec, get(s, sec["table"], sec["query"], LINE_FIELDS)) for sec in cfg]
@@ -230,7 +342,7 @@ def pick(s, a):
     rows = fetch_tasks(s, a)
     lines = "\n".join(task_line(t).strip() for t in rows)
     TTY, LINKS = tty, links
-    me = f"'{sys.executable}' '{os.path.realpath(__file__)}'"
+    me = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.realpath(__file__))}"
     r = subprocess.run([
         "fzf", "--ansi", "--no-sort", "--layout=reverse",
         "--header", "enter: open here · ctrl-o: browser · esc: quit",
@@ -301,6 +413,8 @@ def preview_confirm(a, title, table, body):
     print(f"{c('1', title)}  {c('2', table)}")
     for k, v in body.items():
         tag = c("33", "CUSTOMER-VISIBLE comment") if k == "comments" else k
+        if k == "assigned_to" and getattr(a, "assign_label", None):
+            v = a.assign_label
         first, *rest = v.splitlines() or [""]
         print(f"  {tag}: {first}" + (c("2", f"  (+{len(rest)} lines)") if rest else ""))
     while not a.yes:
@@ -315,8 +429,39 @@ def preview_confirm(a, title, table, body):
         die("aborted")
 
 
+def as_text(v):
+    """Config values may be numbers or booleans; the API and the preview want text."""
+    return ("true" if v else "false") if isinstance(v, bool) else str(v)
+
+
+def config_fields(entry):
+    return {k: as_text(v) for k, v in (entry.get("fields") or {}).items() if not k.startswith("_")}
+
+
+def resolve_user(s, who):
+    """(sys_id, label) for --assign. A bare display name can match several people, so look the
+    user up by name, user name or email and refuse to guess."""
+    if who == "me":
+        rows = get(s, "sys_user", f"sys_id={ME}", "sys_id,name,user_name")
+        if not rows:
+            die("cannot read your own user record - use --assign with your user name")
+    else:
+        if "^" in who:
+            die("--assign: '^' is not allowed in a name")
+        rows = get(s, "sys_user", f"active=true^name={who}^ORuser_name={who}^ORemail={who}",
+                   "sys_id,name,user_name,email")
+        if not rows:
+            return None, None                            # not visible to us: let ServiceNow match the name
+        if len(rows) > 1:
+            names = "; ".join(f"{u['name']} ({u['user_name']})" for u in rows[:10])
+            die(f"--assign '{who}' matches {len(rows)} users: {names} - pass the user name or email instead")
+    u = rows[0]
+    return u["_raw"]["sys_id"], f"{u['name']} ({u['user_name']})"
+
+
 def common_fields(s, a, body):
     """--note/--comment/--set/--assign, shared by update and create."""
+    a.assign_label = None
     if a.note:
         body["work_notes"] = read_text(a.note)
     if a.comment:
@@ -327,31 +472,38 @@ def common_fields(s, a, body):
             die(f"--set expects field=value, got '{kv}'")
         body[k.strip()] = v
     if a.assign:
-        body["assigned_to"] = (get(s, "sys_user", f"sys_id={ME}", "sys_id")[0]["_raw"]["sys_id"]
-                               if a.assign == "me" else a.assign)
+        sys_id, a.assign_label = resolve_user(s, a.assign)
+        body["assigned_to"] = sys_id or a.assign
+
+
+def same(want, got):
+    """Loose comparison for the read-back: case, line endings and number formatting don't count."""
+    x, y = (clean(str("" if v is None else v)).strip().lower() for v in (want, got))
+    if x == y:
+        return True
+    try:
+        return float(x) == float(y)                      # 4 == 4.00
+    except ValueError:
+        return False
 
 
 def verify(a, body, res):
     """ServiceNow silently drops writes blocked by ACLs or invalid choices: compare what came back."""
-    skip = JOURNAL | ({"assigned_to"} if a.assign == "me" else set())   # "me" is sent as a sys_id
-    bad = [k for k, v in body.items() if k not in skip and str(res.get(k, "")).lower() != v.lower()]
+    skip = JOURNAL | ({"assigned_to"} if a.assign_label else set())     # sent as a sys_id, comes back as a name
+    bad = [k for k, v in body.items() if k not in skip and not same(v, res.get(k, ""))]
     for k in bad:
         print(c("31", f"  {k} not applied: wanted '{body[k]}', is '{res.get(k)}'"))
     return bad
 
 
-def api_error(r):
-    try:
-        err = r.json().get("error", {})
-        return f"{err.get('message', '')} {err.get('detail') or ''}".strip()
-    except ValueError:
-        return r.text[:300]
-
-
 def create(s, a):
-    tmpl = CFG.get("templates", {}).get(a.new)
+    tmpl = None if a.new.startswith("_") else CFG.get("templates", {}).get(a.new)
+    if tmpl is not None and not (isinstance(tmpl, dict) and tmpl.get("table")):
+        die(f"template '{a.new}' in {CONFIG_FILE} needs a \"table\"")
     table = tmpl["table"] if tmpl else a.new
-    body = dict(tmpl.get("fields", {})) if tmpl else {}
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", table):
+        die(f"'{table}' is neither a template in {CONFIG_FILE} nor a table name")
+    body = config_fields(tmpl) if tmpl else {}
     if a.title:
         body["short_description"] = a.title
     if a.desc:
@@ -362,20 +514,17 @@ def create(s, a):
 
     preview_confirm(a, f"NEW {a.new}", table, body)
     fields = ",".join(["sys_id", "number", "state", "assigned_to"] + [k for k in body if k not in JOURNAL])
-    r = s.post(f"{BASE}/api/now/table/{table}", timeout=60, json=body, params={
+    res = call(s, "POST", f"/api/now/table/{table}", json=body, params={
         "sysparm_input_display_value": "true",
         "sysparm_display_value": "true",
         "sysparm_exclude_reference_link": "true",
         "sysparm_fields": fields,
     })
-    if r.status_code == 401:
-        die(f"401 - session expired or token rejected, refresh {COOKIE_FILE}")
-    if r.status_code >= 400:
-        die(f"{r.status_code} - not created: {api_error(r)}")
-    res = r.json()["result"]
-    t = {"number": res["number"], "_raw": {"sys_id": res["sys_id"]}}
-    cell = num_cell(t, 0, table).rstrip()
-    print(c("32", "created") + f"  {cell}  state: {res.get('state')}  assigned: {res.get('assigned_to') or '-'}")
+    res = {k: clean(v) for k, v in res.items()}
+    sys_id = res.get("sys_id") or ""
+    t = {"number": res.get("number") or sys_id or "(no number)", "_raw": {"sys_id": sys_id}}   # not every table numbers
+    cell = num_cell(t, 0, table).rstrip() if sys_id else t["number"]
+    print(c("32", "created") + f"  {cell}  state: {res.get('state') or '-'}  assigned: {res.get('assigned_to') or '-'}")
     if verify(a, body, res):
         sys.exit(1)
 
@@ -396,7 +545,7 @@ def update(s, a, table, sys_id, num):
             die(f"preset '{name}' is for {', '.join(preset['tables'])}, not {table}")
         if preset.get("require_hours") and a.hours is None:
             die(f"preset '{name}' needs --hours N")
-        body.update(preset.get("fields", {}))
+        body.update(config_fields(preset))
         body[preset.get("notes_field", "close_notes")] = read_text(text)
     if a.hours is not None:
         hours_field = preset.get("hours_field") or CFG.get("hours_field")
@@ -410,17 +559,13 @@ def update(s, a, table, sys_id, num):
     preview_confirm(a, num, table, body)
 
     fields = ",".join(["number", "state", "assigned_to"] + [k for k in body if k not in JOURNAL])
-    r = s.patch(f"{BASE}/api/now/table/{table}/{sys_id}", timeout=60, json=body, params={
+    res = call(s, "PATCH", f"/api/now/table/{table}/{sys_id}", json=body, params={
         "sysparm_input_display_value": "true",   # allows state="In Progress", assigned_to="Name"
         "sysparm_display_value": "true",
         "sysparm_exclude_reference_link": "true",
         "sysparm_fields": fields,
     })
-    if r.status_code == 401:
-        die(f"401 - session expired or token rejected, refresh {COOKIE_FILE}")
-    if r.status_code >= 400:
-        die(f"{r.status_code} - not updated: {api_error(r)}")
-    res = r.json()["result"]
+    res = {k: clean(v) for k, v in res.items()}
     print(c("32", "updated") + f"  state: {res.get('state')}  assigned: {res.get('assigned_to')}")
     if verify(a, body, res):
         sys.exit(1)
@@ -505,6 +650,8 @@ def main():
             a.preset = [name, text]
     if not INSTANCE:
         p.error(f"no instance: set \"instance\" in {CONFIG_FILE} or export SLEET_INSTANCE")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", INSTANCE):     # it becomes the host the cookie is sent to
+        p.error(f"instance '{INSTANCE}' must be only the name before .service-now.com (letters, digits, hyphens)")
     if a.new and a.number:
         p.error("--new creates a record; leave out the ticket number")
     if a.new and (a.preset or a.hours is not None):
@@ -539,6 +686,8 @@ def run():
         main()
     except requests.exceptions.ConnectionError as e:
         die(f"cannot reach {BASE}: {e.__class__.__name__} (VPN/DNS?)")
+    except requests.exceptions.RequestException as e:
+        die(f"request to {BASE} failed: {e.__class__.__name__}")
     except KeyboardInterrupt:
         die("interrupted")
 
