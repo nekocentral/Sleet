@@ -13,6 +13,9 @@
       "tables": [
         "incident"
       ],
+      "required": [
+        "close_code"
+      ],
       "fields": {
         "state": "Resolved",
         "close_code": "Solved (Permanently)"
@@ -34,13 +37,19 @@
     }
   },
   "templates": {
-    "_comment": "sleet --new inc -t \"title\" [--desc ...] [--set ...]; values are display labels",
+    "_comment": "sleet --new inc -t \"title\" [--desc ...] [--set ...]; values are display labels. Generate one with: sleet --template incident",
     "inc": {
       "table": "incident",
+      "required": [
+        "assignment_group",
+        "caller_id"
+      ],
       "fields": {
         "impact": "3 - Low",
         "urgency": "3 - Low",
-        "assignment_group": "Your Team"
+        "assignment_group": "Your Team",
+        "_caller_id": "left empty on purpose: pass --set caller_id=\"Full Name\" per ticket",
+        "caller_id": ""
       }
     },
     "chg": {

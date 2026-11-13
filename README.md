@@ -95,7 +95,7 @@ sleet --new incident -t "Short description" --set caller_id="Full Name" --set ca
 echo "details" | sleet --new inc -t "Title" --desc -
 ```
 
-Templates hold the fields you always set, such as caller, group, category and impact. `-m`, `--comment`, `--set` and `--assign` work as for updates and override template values. The new number is printed as a link. If ServiceNow refuses the record, `sleet` prints its error, which usually names the missing mandatory field.
+Templates hold the fields you always set, such as caller, group, category and impact. `-m`, `--comment`, `--set` and `--assign` work as for updates and override template values. The new number is printed as a link. If ServiceNow refuses the record, `sleet` prints its error. Most of the time it doesn't refuse: the API accepts records with fields missing that the form requires, so list those under `required` in the template (see [Find fields and build templates](#find-fields-and-build-templates)).
 
 `--assign` looks the user up by full name, user name or email. If a name matches more than one active user, `sleet` lists them and stops, so you can pass the user name or email instead.
 
