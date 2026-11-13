@@ -20,7 +20,7 @@ from urllib.parse import quote
 
 import requests
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "sleet")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
@@ -170,9 +170,10 @@ def api_error(r):
         return clean(r.text[:300])
 
 
-def call(s, method, path, **kw):
+def call(s, method, path, soft=False, **kw):
     """One API request. Never follows redirects (they lead to the SSO page and would carry the
-    token along), turns every failure into a one-line message, and returns the "result"."""
+    token along), turns every failure into a one-line message, and returns the "result".
+    soft=True returns None when the instance refuses or doesn't know the request (optional lookups)."""
     write = method != "GET"
     unsure = "it may or may not have been applied - check the ticket before you retry"
     while True:
@@ -191,19 +192,23 @@ def call(s, method, path, **kw):
         forget_token()
         die(f"{r.status_code} - session expired or token rejected, refresh {COOKIE_FILE}")
     if r.status_code >= 400:
+        if soft:
+            return None
         die(f"{r.status_code} - {'not written' if write else 'request refused'}: {api_error(r)}")
     try:
         return r.json()["result"]
     except (ValueError, KeyError, TypeError):
+        if soft:
+            return None
         if write:
             die(f"unreadable response to the write ({r.status_code}): {unsure}")
         die(f"unexpected response from {BASE} (not JSON) - is the session still valid? refresh {COOKIE_FILE}")
 
 
-def get(s, table, query, fields):
+def get(s, table, query, fields, soft=False):
     out = []
     while True:
-        page = call(s, "GET", f"/api/now/table/{table}", params={
+        page = call(s, "GET", f"/api/now/table/{table}", soft=soft, params={
             "sysparm_query": query,
             "sysparm_fields": fields,
             "sysparm_display_value": "all",
@@ -211,6 +216,8 @@ def get(s, table, query, fields):
             "sysparm_limit": str(PAGE),
             "sysparm_offset": str(len(out)),
         })
+        if not isinstance(page, list):                   # soft lookup refused
+            return None
         for row in page:
             d = {k: clean(v.get("display_value") if isinstance(v, dict) else v) or "" for k, v in row.items()}
             d["_raw"] = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in row.items()}
@@ -435,7 +442,16 @@ def as_text(v):
 
 
 def config_fields(entry):
-    return {k: as_text(v) for k, v in (entry.get("fields") or {}).items() if not k.startswith("_")}
+    """Field values of a template or preset. "_keys" are notes; empty values are placeholders, never sent."""
+    return {k: as_text(v) for k, v in (entry.get("fields") or {}).items()
+            if not k.startswith("_") and as_text(v).strip()}
+
+
+def check_required(kind, name, entry, body):
+    """The API accepts records the form would refuse; "required" in config.json puts that check back."""
+    missing = [f for f in entry.get("required") or [] if not str(body.get(f, "")).strip()]
+    if missing:
+        die(f"{kind} '{name}' requires {', '.join(missing)} - set it in {CONFIG_FILE} or pass --set FIELD=VALUE")
 
 
 def resolve_user(s, who):
@@ -497,7 +513,8 @@ def verify(a, body, res):
 
 
 def create(s, a):
-    tmpl = None if a.new.startswith("_") else CFG.get("templates", {}).get(a.new)
+    templates = {k: v for k, v in CFG.get("templates", {}).items() if not k.startswith("_")}
+    tmpl = templates.get(a.new)
     if tmpl is not None and not (isinstance(tmpl, dict) and tmpl.get("table")):
         die(f"template '{a.new}' in {CONFIG_FILE} needs a \"table\"")
     table = tmpl["table"] if tmpl else a.new
@@ -511,7 +528,12 @@ def create(s, a):
     common_fields(s, a, body)
     if not body.get("short_description"):
         die("a new record needs a title: -t \"short description\"")
+    if tmpl:
+        check_required("template", a.new, tmpl, body)
 
+    if not tmpl:                                         # a mistyped template name would otherwise go out as a table
+        print(c("33", f"no template '{a.new}' in {CONFIG_FILE} (have: {', '.join(templates) or 'none'})"
+                      f" - creating directly in table '{table}'"))
     preview_confirm(a, f"NEW {a.new}", table, body)
     fields = ",".join(["sys_id", "number", "state", "assigned_to"] + [k for k in body if k not in JOURNAL])
     res = call(s, "POST", f"/api/now/table/{table}", json=body, params={
@@ -527,6 +549,175 @@ def create(s, a):
     print(c("32", "created") + f"  {cell}  state: {res.get('state') or '-'}  assigned: {res.get('assigned_to') or '-'}")
     if verify(a, body, res):
         sys.exit(1)
+
+
+NAME = re.compile(r"[a-z][a-z0-9_]*")
+SYSTEM = re.compile(r"sys_|number$|opened_|closed_|resolved_")     # filled in by ServiceNow itself
+
+
+def table_chain(s, table):
+    """The table and its parents, nearest first: fields, choices and policies are inherited."""
+    chain = [table]
+    rows = get(s, "sys_db_object", f"name={table}", "name,super_class", soft=True)
+    readable = bool(rows)
+    while rows and rows[0]["_raw"].get("super_class") and len(chain) < 10:
+        rows = get(s, "sys_db_object", f"sys_id={rows[0]['_raw']['super_class']}", "name,super_class", soft=True)
+        if rows and rows[0]["_raw"].get("name"):
+            chain.append(rows[0]["_raw"]["name"])
+    if not readable and table != "task":
+        chain.append("task")                             # hierarchy not readable: ticket tables extend task
+    return chain
+
+
+def policy_rules(s, chain, rule_table, parent, table_field):
+    """Fields a UI or data policy makes mandatory: {field: [condition, ...]}, None when not readable.
+    Filtered again on our side, because ServiceNow ignores query terms it doesn't understand."""
+    p = f"{parent}."
+    rows = get(s, rule_table, f"{p}{table_field}IN{','.join(chain)}^{p}active=true^mandatory=true",
+               f"field,mandatory,{p}{table_field},{p}active,{p}inherit,{p}conditions,{p}short_description", soft=True)
+    if rows is None:
+        return None
+    out = {}
+    for r in rows:
+        raw = r["_raw"]
+        tbl = raw.get(p + table_field)
+        if str(raw.get("mandatory")) != "true" or str(raw.get(p + "active")) != "true" or tbl not in chain:
+            continue
+        if tbl != chain[0] and str(raw.get(p + "inherit")) != "true":
+            continue
+        cond = re.sub(r"\^EQ$", "", clean(str(raw.get(p + "conditions") or "")))
+        out.setdefault(str(raw.get("field") or ""), []).append(cond)
+    out.pop("", None)
+    return out
+
+
+def describe(s, table):
+    """({field: {label, type, reference, choices, required}}, notes) for a table.
+    "required" is a list of reasons: "always", "on the form", "on the form when <condition>"."""
+    chain = table_chain(s, table)
+    fields, notes = {}, []
+    meta = call(s, "GET", f"/api/now/ui/meta/{table}", soft=True)
+    cols = meta.get("columns") if isinstance(meta, dict) else None
+    if isinstance(cols, dict) and cols:
+        for name, col in cols.items():
+            if isinstance(col, dict):
+                fields[name] = {
+                    "label": clean(str(col.get("label") or "")), "type": str(col.get("type") or ""),
+                    "reference": str(col.get("reference") or ""),
+                    "choices": [[clean(str(ch.get("label") or "")), str(ch.get("value") or "")]
+                                for ch in col.get("choices") or [] if isinstance(ch, dict)],
+                    "required": ["always"] if col.get("mandatory") is True else [],
+                }
+    else:
+        rows = get(s, "sys_dictionary", f"nameIN{','.join(chain)}^elementISNOTEMPTY^active=true",
+                   "name,element,column_label,internal_type,mandatory,reference", soft=True)
+        if rows is None:
+            die(f"cannot read the field definitions of '{table}' with your rights")
+        for r in sorted(rows, key=lambda r: -chain.index(r["_raw"]["name"]) if r["_raw"]["name"] in chain else 0):
+            raw = r["_raw"]
+            fields[raw["element"]] = {
+                "label": r["column_label"], "type": str(raw.get("internal_type") or ""),
+                "reference": str(raw.get("reference") or ""), "choices": [],
+                "required": ["always"] if str(raw.get("mandatory")) == "true" else [],
+            }
+    if not fields:
+        die(f"no fields found for table '{table}' - is the name right?")
+
+    if not any(f["choices"] for f in fields.values()):   # no choices from the metadata call: read them directly
+        rows = get(s, "sys_choice", f"nameIN{','.join(chain)}^inactive=false^ORDERBYsequence",
+                   "name,element,label,value,language", soft=True)
+        if rows is None:
+            notes.append("choice lists are not readable with your rights")
+        for name, f in fields.items():
+            mine = [r for r in rows or [] if r["_raw"]["element"] == name]
+            for t in chain:                              # the nearest table that defines choices wins
+                here = [r for r in mine if r["_raw"]["name"] == t]
+                if here:
+                    langs = {r["_raw"]["language"] for r in here}
+                    f["choices"] = [[r["label"] + (f" [{r['_raw']['language']}]" if len(langs) > 1 else ""),
+                                     str(r["_raw"]["value"])] for r in here]
+                    break
+
+    for what, rules in (("UI policies", policy_rules(s, chain, "sys_ui_policy_action", "ui_policy", "table")),
+                        ("data policies", policy_rules(s, chain, "sys_data_policy_rule", "sys_data_policy",
+                                                       "model_table"))):
+        if rules is None:
+            notes.append(f"{what} are not readable with your rights, so fields they make mandatory are not marked")
+            continue
+        for name, conds in rules.items():
+            if name in fields:
+                fields[name]["required"] += [f"on the form when {c}" if c else "on the form" for c in conds]
+    return fields, notes
+
+
+def always_required(f):
+    return any(r in ("always", "on the form") for r in f["required"])
+
+
+def lookup_table(name):
+    """--fields/--template accept a template name from config.json as well as a table name."""
+    tmpl = CFG.get("templates", {}).get(name)
+    table = tmpl["table"] if isinstance(tmpl, dict) and tmpl.get("table") else name
+    if not NAME.fullmatch(table):
+        die(f"'{table}' is not a table name")
+    return table
+
+
+def show_fields(s, a):
+    table = lookup_table(a.fields[0])
+    fields, notes = describe(s, table)
+    if len(a.fields) == 2:                               # one field: its choices
+        name = a.fields[1]
+        f = fields.get(name) or die(f"{table} has no field '{name}' - run: sleet --fields {a.fields[0]}")
+        if a.json:
+            return print(json.dumps({name: f}, indent=2))
+        print(f"{c('1', f'{table}.{name}')}  {f['label']}  {c('2', f['type'])}")
+        if f["required"]:
+            print(f"  required: {', '.join(f['required'])}")
+        if f["choices"]:
+            print(c("2", "  use the label on the left with --set and in config.json"))
+            for label, value in f["choices"]:
+                print(f"  {label:<40} {c('2', value)}")
+        elif f["reference"]:
+            print(f"  a reference to {f['reference']}: use the display value, exactly as the form shows it")
+        else:
+            print("  no choice list: free text or a value of this type")
+    else:
+        if a.json:
+            return print(json.dumps(fields, indent=2))
+        order = sorted(fields, key=lambda n: (not always_required(fields[n]), not fields[n]["required"], n))
+        width = max(len(n) for n in order)
+        print(f"{c('1', table)}  {len(fields)} fields  {c('2', 'required first')}")
+        for n in order:
+            f = fields[n]
+            kind = (f"{len(f['choices'])} choice{'s' * (len(f['choices']) != 1)}" if f["choices"] else
+                    f"-> {f['reference']}" if f["reference"] else f["type"])
+            req = c("33", "  required: " + ", ".join(dict.fromkeys(f["required"]))) if f["required"] else ""
+            print(f"  {n:<{width}}  {f['label'][:28]:<28}  {kind}{req}")
+    for n in notes:
+        print(f"[sleet] note: {n}", file=sys.stderr)
+
+
+def make_template(s, a):
+    """Print a template for --new, ready to paste under "templates" in config.json."""
+    table = lookup_table(a.template)
+    fields, notes = describe(s, table)
+    skip = {"short_description", "description"}          # come from -t and --desc
+    req = [n for n in sorted(fields) if always_required(fields[n]) and n not in skip and not SYSTEM.match(n)]
+    body = {}
+    for n in req:
+        if fields[n]["choices"]:
+            body["_" + n] = "one of: " + " | ".join(label for label, _ in fields[n]["choices"])
+        elif fields[n]["reference"]:
+            body["_" + n] = f"display value of a {fields[n]['reference']} record"
+        body[n] = ""
+    print(json.dumps({table: {"table": table, "required": req, "fields": body}}, indent=2))
+    later = {n: [r for r in f["required"] if r.startswith("on the form when")] for n, f in fields.items()}
+    hints = ["paste this under \"templates\" in config.json, rename the key if you like, and fill in the empty values",
+             "empty values are not sent; \"required\" makes sleet stop when one is still empty"]
+    hints += [f"{n} is required {', '.join(w)}; add it to a preset for that step" for n, w in sorted(later.items()) if w and n not in req]
+    for n in hints + notes:
+        print(f"[sleet] note: {n}", file=sys.stderr)
 
 
 def writing(a):
@@ -555,6 +746,8 @@ def update(s, a, table, sys_id, num):
     common_fields(s, a, body)
     if not any(v.strip() for v in body.values()):
         die("nothing to write (empty text?)")
+    if a.preset:
+        check_required("preset", a.preset[0], preset, body)
 
     preview_confirm(a, num, table, body)
 
@@ -624,6 +817,11 @@ def main():
     p.add_argument("-w", "--web", action="store_true", help="with a number: open it in the browser")
     p.add_argument("-n", "--notes", type=int, default=5, metavar="N",
                    help="with a number: activity entries to show (0 = all, default 5)")
+    d = p.add_argument_group("discover (read-only)")
+    d.add_argument("--fields", nargs="+", metavar=("TABLE", "FIELD"),
+                   help="fields of a table with the required ones first; add a field name to list its choices")
+    d.add_argument("--template", metavar="TABLE",
+                   help="print a --new template for a table, with its required fields, to paste into config.json")
     n = p.add_argument_group("create (no number)")
     n.add_argument("--new", metavar="TEMPLATE|TABLE",
                    help="create a record from a config template (e.g. inc) or a table (e.g. incident)")
@@ -652,6 +850,10 @@ def main():
         p.error(f"no instance: set \"instance\" in {CONFIG_FILE} or export SLEET_INSTANCE")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", INSTANCE):     # it becomes the host the cookie is sent to
         p.error(f"instance '{INSTANCE}' must be only the name before .service-now.com (letters, digits, hyphens)")
+    if a.fields and len(a.fields) > 2:
+        p.error("--fields takes a table and at most one field")
+    if (a.fields or a.template) and (a.number or a.new or writing(a) or (a.fields and a.template)):
+        p.error("--fields and --template stand alone")
     if a.new and a.number:
         p.error("--new creates a record; leave out the ticket number")
     if a.new and (a.preset or a.hours is not None):
@@ -664,7 +866,11 @@ def main():
         p.error("only one of --note/--comment/--desc/--preset can read stdin")
 
     s = session()
-    if a.new:
+    if a.fields:
+        show_fields(s, a)
+    elif a.template:
+        make_template(s, a)
+    elif a.new:
         create(s, a)
     elif a.number:
         show(s, a)

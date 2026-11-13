@@ -101,7 +101,23 @@ Templates hold the fields you always set, such as caller, group, category and im
 
 If a write times out or the connection drops, `sleet` can't tell whether ServiceNow applied it. It says so, and you should check the ticket before you retry.
 
-`--set` takes the technical field name and the *display value* exactly as the form shows it. Labels are case-sensitive. To find a field name, right-click its label on the classic form.
+`--set` takes the technical field name and the *display value* exactly as the form shows it. Labels are case-sensitive. To find field names and labels, use `--fields`.
+
+## Find fields and build templates
+
+Labels and required fields differ per instance. These commands only read:
+
+| Command | Shows |
+| --- | --- |
+| `sleet --fields incident` | Every field of the table, with the required ones first |
+| `sleet --fields incident impact` | The choices of one field, with the labels to use in `--set` and `config.json` |
+| `sleet --template incident` | A template for `--new` with the required fields, to paste under `templates` in `config.json` |
+
+Instead of a table name you can pass a template name from `config.json`. Add `-j` for JSON.
+
+ServiceNow checks most required fields only in the web form, not in the API, so `--new` can create a record that the form would refuse. `--fields` marks those as "on the form", read from the UI policies and data policies when your rights allow it; a note tells you when they don't. Put the fields in `required` in a template or preset, and `sleet` stops before writing when one is empty.
+
+A generated template has empty values for you to fill in. Empty values are never sent, and keys that start with `_` are notes.
 
 ## Configure
 
@@ -114,6 +130,16 @@ All configuration lives in `~/.config/sleet/` (or `$XDG_CONFIG_HOME/sleet/`):
 | `token` | The session token, cached by `sleet` so commands start faster. Treat it as a password. |
 | `sections.json` | Optional: custom board sections, one encoded query each |
 
+### Templates
+
+A template is the starting point for `--new NAME`. Generate one with `sleet --template TABLE`.
+
+| Key | Meaning |
+| --- | --- |
+| `table` | The table the record is created in, for example `incident` |
+| `fields` | Field names and display values to set |
+| `required` | Fields that must have a value, from the template or from `--set`, before `sleet` creates the record |
+
 ### Presets
 
 A preset is a named set of field values plus a notes field. `-r` and `--review` are shortcuts for the presets named `resolve` and `review`. See `config.example.json`:
@@ -125,6 +151,7 @@ A preset is a named set of field values plus a notes field. `-r` and `--review` 
 | `notes_field` | The field that receives the notes text, `close_notes` by default |
 | `hours_field` | The field that receives `--hours` |
 | `require_hours` | When `true`, the preset refuses to run without `--hours` |
+| `required` | Fields that must have a value before `sleet` writes, for example `["close_code"]` |
 
 Any `--set` in the same command overrides a preset value.
 
