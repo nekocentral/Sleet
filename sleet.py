@@ -610,7 +610,8 @@ def describe(s, table):
                     "label": clean(str(col.get("label") or "")), "type": str(col.get("type") or ""),
                     "reference": str(col.get("reference") or ""),
                     "choices": [[clean(str(ch.get("label") or "")), str(ch.get("value") or "")]
-                                for ch in col.get("choices") or [] if isinstance(ch, dict)],
+                                for ch in col.get("choices") or []
+                                if isinstance(ch, dict) and str(ch.get("value") or "")],     # drop "-- None --"
                     "required": ["mandatory field"] if col.get("mandatory") is True and not name.startswith("sys_") else [],
                 }
     else:
@@ -641,7 +642,7 @@ def describe(s, table):
                 if here:
                     langs = {r["_raw"]["language"] for r in here}
                     f["choices"] = [[r["label"] + (f" [{r['_raw']['language']}]" if len(langs) > 1 else ""),
-                                     str(r["_raw"]["value"])] for r in here]
+                                     str(r["_raw"]["value"])] for r in here if str(r["_raw"]["value"])]
                     break
 
     hidden = []
