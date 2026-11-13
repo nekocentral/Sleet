@@ -593,7 +593,8 @@ def policy_rules(s, chain, rule_table, parent, table_field):
 
 def describe(s, table):
     """({field: {label, type, reference, choices, required}}, notes) for a table.
-    "required" is a list of reasons: "always", "on the form", "on the form when <condition>"."""
+    "required" is a list of reasons: "mandatory field" (the field definition), "on the form" and
+    "on the form when <condition>" (policies). The API enforces none of them reliably."""
     probe = call(s, "GET", f"/api/now/table/{table}", soft=True,
                  params={"sysparm_limit": "1", "sysparm_fields": "sys_id"})
     if probe is None:                                    # tell a wrong name apart from missing rights
@@ -610,7 +611,7 @@ def describe(s, table):
                     "reference": str(col.get("reference") or ""),
                     "choices": [[clean(str(ch.get("label") or "")), str(ch.get("value") or "")]
                                 for ch in col.get("choices") or [] if isinstance(ch, dict)],
-                    "required": ["always"] if col.get("mandatory") is True else [],
+                    "required": ["mandatory field"] if col.get("mandatory") is True and not name.startswith("sys_") else [],
                 }
     else:
         rows = get(s, "sys_dictionary", f"nameIN{','.join(chain)}^elementISNOTEMPTY^active=true",
@@ -622,7 +623,8 @@ def describe(s, table):
             fields[raw["element"]] = {
                 "label": r["column_label"], "type": str(raw.get("internal_type") or ""),
                 "reference": str(raw.get("reference") or ""), "choices": [],
-                "required": ["always"] if str(raw.get("mandatory")) == "true" else [],
+                "required": (["mandatory field"] if str(raw.get("mandatory")) == "true"
+                             and not raw["element"].startswith("sys_") else []),
             }
     if not fields:
         die(f"no fields found for table '{table}' - is the name right?")
@@ -642,20 +644,24 @@ def describe(s, table):
                                      str(r["_raw"]["value"])] for r in here]
                     break
 
+    hidden = []
     for what, rules in (("UI policies", policy_rules(s, chain, "sys_ui_policy_action", "ui_policy", "table")),
                         ("data policies", policy_rules(s, chain, "sys_data_policy_rule", "sys_data_policy",
                                                        "model_table"))):
         if rules is None:
-            notes.append(f"{what} are not readable with your rights, so fields they make mandatory are not marked")
+            hidden.append(what)
             continue
         for name, conds in rules.items():
             if name in fields:
                 fields[name]["required"] += [f"on the form when {c}" if c else "on the form" for c in conds]
+    if hidden:
+        notes.append(f"{' and '.join(hidden)} are not readable with your rights; "
+                     "fields that only they make required are not marked")
     return fields, notes
 
 
 def always_required(f):
-    return any(r in ("always", "on the form") for r in f["required"])
+    return any(r in ("mandatory field", "on the form") for r in f["required"])
 
 
 def lookup_table(name):
