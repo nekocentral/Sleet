@@ -115,7 +115,7 @@ Labels and required fields differ per instance. These commands only read:
 
 Instead of a table name you can pass a template name from `config.json`. Add `-j` for JSON.
 
-ServiceNow checks most required fields only in the web form, not in the API, so `--new` can create a record that the form would refuse. `--fields` marks those as "on the form", read from the UI policies and data policies when your rights allow it; a note tells you when they don't. Put the fields in `required` in a template or preset, and `sleet` stops before writing when one is empty.
+ServiceNow checks most required fields only in the web form, not in the API, so `--new` can create a record that the form would refuse. `--fields` marks a field as required when its definition says "mandatory field", or when a UI policy or data policy requires it "on the form". Policies are only readable with the right roles; a note tells you when they aren't. Put the fields in `required` in a template or preset, and `sleet` stops before writing when one is empty.
 
 A generated template has empty values for you to fill in. Empty values are never sent, and keys that start with `_` are notes.
 
