@@ -594,6 +594,10 @@ def policy_rules(s, chain, rule_table, parent, table_field):
 def describe(s, table):
     """({field: {label, type, reference, choices, required}}, notes) for a table.
     "required" is a list of reasons: "always", "on the form", "on the form when <condition>"."""
+    probe = call(s, "GET", f"/api/now/table/{table}", soft=True,
+                 params={"sysparm_limit": "1", "sysparm_fields": "sys_id"})
+    if probe is None:                                    # tell a wrong name apart from missing rights
+        die(f"no table '{table}' that you can read - check the name (tables are singular: incident, change_request)")
     chain = table_chain(s, table)
     fields, notes = {}, []
     meta = call(s, "GET", f"/api/now/ui/meta/{table}", soft=True)
@@ -612,7 +616,7 @@ def describe(s, table):
         rows = get(s, "sys_dictionary", f"nameIN{','.join(chain)}^elementISNOTEMPTY^active=true",
                    "name,element,column_label,internal_type,mandatory,reference", soft=True)
         if rows is None:
-            die(f"cannot read the field definitions of '{table}' with your rights")
+            die(f"cannot read the field definitions of '{table}': the metadata API and sys_dictionary both refused")
         for r in sorted(rows, key=lambda r: -chain.index(r["_raw"]["name"]) if r["_raw"]["name"] in chain else 0):
             raw = r["_raw"]
             fields[raw["element"]] = {
