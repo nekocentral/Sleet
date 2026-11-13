@@ -497,7 +497,8 @@ def verify(a, body, res):
 
 
 def create(s, a):
-    tmpl = None if a.new.startswith("_") else CFG.get("templates", {}).get(a.new)
+    templates = {k: v for k, v in CFG.get("templates", {}).items() if not k.startswith("_")}
+    tmpl = templates.get(a.new)
     if tmpl is not None and not (isinstance(tmpl, dict) and tmpl.get("table")):
         die(f"template '{a.new}' in {CONFIG_FILE} needs a \"table\"")
     table = tmpl["table"] if tmpl else a.new
@@ -512,6 +513,9 @@ def create(s, a):
     if not body.get("short_description"):
         die("a new record needs a title: -t \"short description\"")
 
+    if not tmpl:                                         # a mistyped template name would otherwise go out as a table
+        print(c("33", f"no template '{a.new}' in {CONFIG_FILE} (have: {', '.join(templates) or 'none'})"
+                      f" - creating directly in table '{table}'"))
     preview_confirm(a, f"NEW {a.new}", table, body)
     fields = ",".join(["sys_id", "number", "state", "assigned_to"] + [k for k in body if k not in JOURNAL])
     res = call(s, "POST", f"/api/now/table/{table}", json=body, params={
