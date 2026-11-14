@@ -80,12 +80,18 @@ def die(msg):
     sys.exit(f"[sleet] {msg}")
 
 
-# control characters (incl. ESC) and bidi overrides: ticket text is untrusted, never let it drive the terminal
-UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+# Ticket text is untrusted: never let it drive the terminal. Removed are the C0 controls except tab and
+# newline (this includes ESC), DEL and the C1 controls, and the bidi overrides and isolates.
+UNSAFE = dict.fromkeys(
+    [c for c in range(0x20) if c not in (0x09, 0x0A)]
+    + list(range(0x7F, 0xA0))
+    + list(range(0x202A, 0x202F))
+    + list(range(0x2066, 0x206A))
+)
 
 
 def clean(v):
-    return UNSAFE.sub("", v) if isinstance(v, str) else v
+    return v.translate(UNSAFE) if isinstance(v, str) else v
 
 
 def read_cookie():
