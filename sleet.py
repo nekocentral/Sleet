@@ -2,31 +2,50 @@
 """sleet - ServiceNow from the terminal, using your own SSO browser session.
 
 Config:   ~/.config/sleet/config.json    (instance, presets, extra detail fields)
-Cookie:   ~/.config/sleet/cookie         (browser Cookie header, chmod 600)
+Cookie:   ~/.config/sleet/cookie         (browser Cookie header, chmod 600; sleet --refresh-cookie on macOS)
 Token:    ~/.config/sleet/token          (cached session token, written by sleet)
 Board:    ~/.config/sleet/sections.json  (optional, dashboard-style sections)
 """
 import argparse
+import contextlib
+import ctypes
+import glob
 import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
+import tempfile
+import time
 import webbrowser
 from urllib.parse import quote
 
 import requests
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "sleet")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 COOKIE_FILE = os.path.join(CONFIG_DIR, "cookie")
 SECTIONS_FILE = os.path.join(CONFIG_DIR, "sections.json")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
+REFRESH = ("sign in to ServiceNow in your browser and run: sleet --refresh-cookie" if sys.platform == "darwin"
+           else f"save your browser Cookie header to {COOKIE_FILE} (chmod 600)")
+G_CK = re.compile(r"g_ck\s*=\s*['\"]([a-f0-9]+)['\"]")
+
+# --refresh-cookie (macOS): where the browsers keep their cookies
+APP_SUPPORT = os.path.expanduser("~/Library/Application Support")
+CHROMIUM = {   # browser: (profile root under APP_SUPPORT, Keychain item holding its cookie key)
+    "chrome": ("Google/Chrome", "Chrome Safe Storage"),
+    "edge": ("Microsoft Edge", "Microsoft Edge Safe Storage"),
+}
+SAFARI_HELP = ("Safari keeps the session in memory only. In Safari: open ServiceNow, Develop > Show Web Inspector "
+               "> Network, reload, right-click a request to your instance > Copy as cURL, then run this again "
+               "(no Develop menu? Settings > Advanced > Show features for web developers)")
 
 
 def load_config():
@@ -100,7 +119,7 @@ def read_cookie():
         with open(COOKIE_FILE) as f:
             raw = f.read().strip()
     except FileNotFoundError:
-        die(f"no cookie file at {COOKIE_FILE} - paste your browser Cookie header there (chmod 600)")
+        die(f"no cookie file at {COOKIE_FILE} - {REFRESH}")
     if mode & 0o077:
         print(f"[sleet] warning: {COOKIE_FILE} is readable by others - run: chmod 600 {COOKIE_FILE}",
               file=sys.stderr)
@@ -142,8 +161,8 @@ def fetch_token(s):
     r = s.get(f"{BASE}/incident_list.do", allow_redirects=False, timeout=30)
     if 300 <= r.status_code < 400 or r.status_code == 401:
         forget_token()
-        die(f"session expired - refresh {COOKIE_FILE}")
-    m = re.search(r"g_ck\s*=\s*['\"]([a-f0-9]+)['\"]", r.text)
+        die(f"session expired - {REFRESH}")
+    m = G_CK.search(r.text)
     if not m:
         die("g_ck not found - grab it from DevTools console and set SLEET_GCK")
     s.headers["X-UserToken"] = m.group(1)
@@ -166,6 +185,225 @@ def session():
     else:
         fetch_token(s)
     return s
+
+
+# --- --refresh-cookie: copy the session out of a browser's cookie store (macOS) ---
+
+def note(msg):
+    print(f"[sleet] {msg}", file=sys.stderr)
+
+
+def for_instance(domain):
+    """True if a browser sends cookies of this domain to BASE."""
+    d = domain.lstrip(".").lower()
+    host = f"{INSTANCE.lower()}.service-now.com"
+    return host == d or host.endswith("." + d)
+
+
+@contextlib.contextmanager
+def db_copy(path):
+    """Open a copy of a browser's SQLite file: the browser locks it and may hold recent writes in -wal."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for ext in ("", "-wal"):
+            if os.path.exists(path + ext):
+                shutil.copyfile(path + ext, os.path.join(tmp, "db" + ext))
+        con = sqlite3.connect(os.path.join(tmp, "db"))
+        try:
+            yield con
+        finally:
+            con.close()
+
+
+def aes_decrypt(key, data):
+    """AES-128-CBC the way Chromium encrypts cookies on macOS, via CommonCrypto (no extra package)."""
+    cc = ctypes.CDLL("/usr/lib/libSystem.dylib")
+    cc.CCCrypt.argtypes = [ctypes.c_uint32] * 3 + [
+        ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+    out, n = ctypes.create_string_buffer(len(data)), ctypes.c_size_t()
+    # kCCDecrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding; the IV is 16 spaces
+    if cc.CCCrypt(1, 0, 1, key, len(key), b" " * 16, data, len(data), out, len(data), ctypes.byref(n)):
+        raise ValueError("cannot decrypt cookie")
+    return out.raw[:n.value]
+
+
+# what a broken, half-written or unexpected browser file can raise: such a profile is skipped, not fatal
+READ_ERRORS = (sqlite3.Error, OSError, ValueError, KeyError, IndexError, TypeError)
+
+
+def unreadable(label, e):
+    note(f"{label}: cannot read its cookies ({e.__class__.__name__}), skipped")
+
+
+def cookie_header(cookies):
+    """Cookie header from (domain, name, value). A name set on several domains is sent once, with the
+    value of the domain closest to the instance, so a cookie on .service-now.com cannot hide the real one."""
+    best = {}
+    for domain, name, value in cookies:
+        rank = len(domain.lstrip("."))
+        if name not in best or rank >= best[name][0]:
+            best[name] = (rank, value)
+    return "; ".join(f"{name}={value}" for name, (_, value) in best.items())
+
+
+def chromium_cookies(browser):
+    """Chrome and Edge write session cookies to disk while they run; the values are encrypted."""
+    root, keychain = CHROMIUM[browser]
+    key = None
+    now = (time.time() + 11644473600) * 1_000_000          # Chromium counts microseconds since 1601
+    for db in sorted(glob.glob(os.path.join(APP_SUPPORT, root, "*", "Cookies"))):
+        label = f"{browser} ({os.path.basename(os.path.dirname(db))})"
+        try:
+            with db_copy(db) as con:
+                version = int(con.execute("SELECT value FROM meta WHERE key = 'version'").fetchone()[0])
+                rows = [r for r in con.execute(
+                    "SELECT host_key, name, value, encrypted_value FROM cookies WHERE host_key LIKE "
+                    "'%service-now.com' AND (expires_utc = 0 OR expires_utc > ?)", (now,)) if for_instance(r[0])]
+            if not rows:
+                continue
+            if key is None:                                 # first use asks for Keychain access
+                pw = subprocess.run(["security", "find-generic-password", "-w", "-s", keychain],
+                                    capture_output=True, text=True)
+                if pw.returncode:
+                    return note(f"{browser}: no access to '{keychain}' in your Keychain")
+                key = hashlib.pbkdf2_hmac("sha1", pw.stdout.strip().encode(), b"saltysalt", 1003, 16)
+            jar, unknown = [], 0
+            for host, name, value, enc in rows:
+                if enc[:3] == b"v10":
+                    value = aes_decrypt(key, enc[3:])
+                    value = (value[32:] if version >= 24 else value).decode()   # 24+: SHA-256 of the domain first
+                elif enc:                                   # a format this code does not know: never send it empty
+                    unknown += 1
+                    continue
+                jar.append((host, name, value))
+            if unknown:
+                note(f"{label}: left out {unknown} cookie{'s' * (unknown != 1)} in an unknown format")
+        except READ_ERRORS as e:
+            unreadable(label, e)
+            continue
+        if jar:
+            yield label, cookie_header(jar)
+
+
+def lz4_block(src):
+    """Decompress one LZ4 block, the format of Firefox's .jsonlz4 files, without the lz4 package."""
+    out, i = bytearray(), 0
+
+    def length(n):
+        nonlocal i
+        if n == 15:
+            while True:
+                i += 1
+                n += src[i - 1]
+                if src[i - 1] != 255:
+                    break
+        return n
+
+    while True:
+        token = src[i]
+        i += 1
+        n = length(token >> 4)                              # literals
+        out += src[i:i + n]
+        i += n
+        if i >= len(src):                                   # the last sequence has literals only
+            return bytes(out)
+        offset = src[i] | src[i + 1] << 8
+        i += 2
+        n = length(token & 15) + 4                          # match copied from earlier output
+        start = len(out) - offset
+        if offset >= n:
+            out += out[start:start + n]
+        else:                                               # overlapping match repeats a pattern
+            for k in range(n):
+                out.append(out[start + k])
+
+
+def firefox_profile(prof):
+    """(domain, name, value) of one Firefox profile: persistent cookies plus the session store."""
+    jar = []
+    if os.path.exists(prof + "cookies.sqlite"):
+        with db_copy(prof + "cookies.sqlite") as con:       # expiry is in seconds, or milliseconds in newer versions
+            jar += [row for row in con.execute(
+                "SELECT host, name, value FROM moz_cookies WHERE host LIKE '%service-now.com' AND "
+                "CASE WHEN expiry > 99999999999 THEN expiry / 1000 ELSE expiry END > ?", (time.time(),))
+                if for_instance(row[0])]
+    # session cookies (the session itself) live only in the session store, saved every 15 s
+    for store in ("sessionstore-backups/recovery.jsonlz4", "sessionstore.jsonlz4"):
+        if os.path.exists(prof + store):
+            with open(prof + store, "rb") as f:
+                data = f.read()
+            if data[:8] == b"mozLz40\0":                      # then 4 bytes of size, then the block
+                jar += [(ck["host"], ck["name"], ck.get("value", ""))
+                        for ck in json.loads(lz4_block(data[12:])).get("cookies", [])
+                        if for_instance(ck.get("host", ""))]
+            break
+    return jar
+
+
+def firefox_cookies():
+    for prof in sorted(glob.glob(os.path.join(APP_SUPPORT, "Firefox", "Profiles", "*", ""))):
+        label = f"firefox ({os.path.basename(prof.rstrip('/'))})"
+        try:
+            jar = firefox_profile(prof)
+        except READ_ERRORS as e:
+            unreadable(label, e)
+            continue
+        if jar:
+            yield label, cookie_header(jar)
+
+
+# a bare clipboard line counts as a Cookie header only if it is nothing but name=value pairs
+COOKIE_PAIRS = re.compile(r"[!#$%&'*+\-.^_`|~\w]+=[^;\s]*(?:;\s*[!#$%&'*+\-.^_`|~\w]+=[^;\s]*)*;?")
+
+
+def safari_cookies():
+    """Safari never writes session cookies to disk, so read a 'Copy as cURL' from the clipboard."""
+    text = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout.strip()
+    m = re.search(r"(?:-b|--cookie)\s+\$?'([^']+)'|cookie:\s*([^'\"\r\n]+)", text, re.I)
+    raw = (m.group(1) or m.group(2)).strip() if m else text if COOKIE_PAIRS.fullmatch(text) else ""
+    if not raw:
+        die(f"no cookie on the clipboard. {SAFARI_HELP}")
+    yield "the clipboard", raw
+
+
+BROWSERS = {
+    "chrome": lambda: chromium_cookies("chrome"),
+    "edge": lambda: chromium_cookies("edge"),
+    "firefox": firefox_cookies,
+    "safari": safari_cookies,
+}
+
+
+def signed_in(raw):
+    """Same check as fetch_token: a web UI page with a g_ck, without following the SSO redirect."""
+    r = requests.get(f"{BASE}/incident_list.do", headers={"Cookie": raw}, allow_redirects=False, timeout=30)
+    return r.status_code == 200 and bool(G_CK.search(r.text))
+
+
+def save_cookie(raw):
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(COOKIE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)                                    # also when the file already existed
+    with os.fdopen(fd, "w") as f:
+        f.write(raw + "\n")
+
+
+def refresh_cookie(browser):
+    """Save the first signed-in session found in the browser(s) to COOKIE_FILE; only a working one."""
+    rejected = False
+    for b in [browser] if browser else ["chrome", "edge", "firefox"]:
+        for label, raw in BROWSERS[b]():
+            if signed_in(raw):
+                save_cookie(raw)
+                return note(f"cookie refreshed from {label}")
+            rejected = True
+            note(f"{label}: its session is not accepted by {BASE}")
+    # cookies were there but refused: the session timed out behind an open tab, or the browser has not
+    # written the new one yet (it saves cookies every 30 seconds or so)
+    die(("the session in your browser has expired or is not saved yet - reload a ServiceNow page there, "
+         "wait 30 seconds and retry" if rejected and browser != "safari" else
+         f"no signed-in session found - sign in to {BASE} in your browser and retry")
+        + ("" if browser else " (Safari: add --browser safari)"))
 
 
 def api_error(r):
@@ -196,7 +434,7 @@ def call(s, method, path, soft=False, **kw):
         break
     if r.status_code == 401 or 300 <= r.status_code < 400:
         forget_token()
-        die(f"{r.status_code} - session expired or token rejected, refresh {COOKIE_FILE}")
+        die(f"{r.status_code} - session expired or token rejected - {REFRESH}")
     if r.status_code >= 400:
         if soft:
             return None
@@ -208,7 +446,7 @@ def call(s, method, path, soft=False, **kw):
             return None
         if write:
             die(f"unreadable response to the write ({r.status_code}): {unsure}")
-        die(f"unexpected response from {BASE} (not JSON) - is the session still valid? refresh {COOKIE_FILE}")
+        die(f"unexpected response from {BASE} (not JSON) - is the session still valid? {REFRESH}")
 
 
 def get(s, table, query, fields, soft=False):
@@ -834,6 +1072,12 @@ def main():
     p.add_argument("-w", "--web", action="store_true", help="with a number: open it in the browser")
     p.add_argument("-n", "--notes", type=int, default=5, metavar="N",
                    help="with a number: activity entries to show (0 = all, default 5)")
+    k = p.add_argument_group("session cookie (macOS)")
+    k.add_argument("--refresh-cookie", action="store_true",
+                   help="first copy your ServiceNow session from the browser into the cookie file")
+    k.add_argument("--browser", choices=list(BROWSERS),
+                   help="with --refresh-cookie: browser to read (default: chrome, edge, firefox in turn); "
+                        "safari reads a 'Copy as cURL' from the clipboard")
     d = p.add_argument_group("discover (read-only)")
     d.add_argument("--fields", nargs="+", metavar=("TABLE", "FIELD"),
                    help="fields of a table with the required ones first; add a field name to list its choices")
@@ -881,7 +1125,13 @@ def main():
         p.error("write options need a ticket number")
     if [a.note, a.comment, a.desc, a.preset and a.preset[1]].count("-") > 1:
         p.error("only one of --note/--comment/--desc/--preset can read stdin")
+    if a.browser and not a.refresh_cookie:
+        p.error("--browser needs --refresh-cookie")
+    if a.refresh_cookie and sys.platform != "darwin":
+        p.error(f"--refresh-cookie reads macOS browsers; {REFRESH}")
 
+    if a.refresh_cookie:
+        refresh_cookie(a.browser)
     s = session()
     if a.fields:
         show_fields(s, a)

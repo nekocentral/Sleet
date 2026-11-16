@@ -23,4 +23,5 @@ chmod +x "$BIN/sleet"
 
 echo "Installed: $BIN/sleet"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "Add to PATH:  export PATH=\"$BIN:\$PATH\"";; esac
-echo "Next: set \"instance\" in $CONF/config.json, then save your browser Cookie header to $CONF/cookie (chmod 600)"
+echo "Next: set \"instance\" in $CONF/config.json, sign in to ServiceNow in your browser, then run:"
+echo "  sleet --refresh-cookie   (macOS; for Safari and Linux see \"Session cookie\" in README.md)"
