@@ -15,7 +15,15 @@ Sleet reads and updates ServiceNow tickets from your terminal. It uses the same 
 
 ## Install
 
-1. Install Sleet with [pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/):
+1. Install Sleet. On macOS, or on Linux with [Homebrew](https://brew.sh):
+
+    ```bash
+    brew install nekocentral/sleet/sleet
+    ```
+
+    Homebrew builds Sleet from source, so the first install takes a few minutes. It includes PyYAML. To update later, run `brew upgrade sleet`.
+
+    On any system, with [pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/):
 
     ```bash
     pipx install git+https://github.com/nekocentral/sleet
@@ -55,7 +63,7 @@ Sleet reads and updates ServiceNow tickets from your terminal. It uses the same 
 
 When `sleet` reports that the session expired, repeat step 3.
 
-### Install without pipx or uv
+### Install from a clone
 
 On macOS and Linux, clone the repository and run the installer. It creates a private virtual environment with `requests` and PyYAML, writes a `sleet` launcher to `~/bin` (or the directory you pass), and copies the example configuration if you don't have one yet:
 
@@ -201,7 +209,7 @@ All configuration lives in `~/.config/sleet/` (or `$XDG_CONFIG_HOME/sleet/`):
 
 ### YAML instead of JSON
 
-`config.yaml` and `sections.yaml` can replace the JSON files. They hold the same keys, and they allow `#` comments. YAML needs [PyYAML](https://pypi.org/project/PyYAML/), which Sleet doesn't install by default. The installer includes it. With pipx or uv:
+`config.yaml` and `sections.yaml` can replace the JSON files. They hold the same keys, and they allow `#` comments. YAML needs [PyYAML](https://pypi.org/project/PyYAML/), which Sleet doesn't install by default. Homebrew and the installer include it. With pipx or uv:
 
 ```bash
 pipx inject sleet pyyaml
