@@ -571,6 +571,15 @@ class GetTest(ServerTestCase):
         self.assertEqual(len(sleet.get(sleet.session(), "task", "", "n")), 4)
         self.assertIn("more than 4 matches", self.err)
 
+    def test_limit_stops_paging_and_asks_for_no_more_than_it_needs(self):
+        pages = {"0": [row(n="1"), row(n="2")], "2": [row(n="3")]}
+        server = self.serve(routes={("GET", "/api/now/table/task"):
+                                    lambda kw: FakeResponse(result=pages[kw["params"]["sysparm_offset"]])})
+        self.patch(sleet, "PAGE", 2)
+        rows = sleet.get(sleet.session(), "task", "", "n", limit=3)
+        self.assertEqual([r["n"] for r in rows], ["1", "2", "3"])
+        self.assertEqual([c["params"]["sysparm_limit"] for c in server.api_calls()], ["2", "1"])
+
     def test_soft_lookup_refused(self):
         self.serve()
         self.assertIsNone(sleet.get(sleet.session(), "sys_ui_policy", "", "x", soft=True))
@@ -861,11 +870,113 @@ class CreateTest(ServerTestCase):
 # main(): argument checks and order
 # --------------------------------------------------------------------------- #
 
+class SearchTest(ServerTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.server = self.serve(routes={("GET", "/api/now/table/task"): FakeResponse(result=TASKS)})
+
+    def query(self):
+        return self.server.api_calls()[0]["params"]["sysparm_query"]
+
+    def test_search_matches_the_number_and_the_short_description(self):
+        self.run_main("--search", "disk")
+        self.assertEqual(self.query(), "short_descriptionLIKEdisk^ORnumberLIKEdisk^ORDERBYDESCsys_updated_on")
+        self.assertEqual(self.server.api_calls()[0]["path"], "/api/now/table/task")
+
+    def test_search_lists_every_state_and_counts(self):
+        self.run_main("--search", "disk")
+        for number in ("INC1", "INC2", "PRB1", "SCTASK1"):
+            self.assertIn(number, self.out)
+        self.assertIn("4 matches", self.out)
+
+    def test_search_with_no_matches(self):
+        self.server.routes[("GET", "/api/now/table/task")] = FakeResponse(result=[])
+        self.run_main("--search", "nothing")
+        self.assertIn("0 matches", self.out)
+
+    def test_in_desc_also_searches_the_description(self):
+        self.run_main("--search", "disk", "--in", "desc")
+        self.assertEqual(self.query(), "short_descriptionLIKEdisk^ORnumberLIKEdisk^ORdescriptionLIKEdisk"
+                                       "^ORDERBYDESCsys_updated_on")
+
+    def test_a_caret_in_the_text_cannot_add_query_terms(self):
+        self.run_main("--search", "x^ORactive=true")
+        self.assertIn("short_descriptionLIKEx^^ORactive=true^ORnumberLIKEx^^ORactive=true", self.query())
+
+    def test_group_and_queue_limit_the_search(self):
+        for flag, scope in (("-g", "assignment_group=javascript:getMyGroups()^"),
+                            ("-u", "assignment_group=javascript:getMyGroups()^assigned_toISEMPTY^")):
+            self.server.calls.clear()
+            self.run_main("--search", "disk", flag)
+            self.assertTrue(self.query().startswith(scope + "short_descriptionLIKEdisk"), self.query())
+
+    def test_query_is_sent_as_written_and_newest_first(self):
+        self.run_main("--query", "active=true^priority=1")
+        self.assertEqual(self.query(), "active=true^priority=1^ORDERBYDESCsys_updated_on")
+
+    def test_query_keeps_its_own_ordering(self):
+        self.run_main("--query", "active=true^ORDERBYnumber")
+        self.assertEqual(self.query(), "active=true^ORDERBYnumber")
+
+    def test_table_picks_the_table(self):
+        self.server.routes[("GET", "/api/now/table/incident")] = FakeResponse(result=TASKS[:1])
+        self.run_main("--table", "incident", "--query", "category=network")
+        self.assertEqual(self.server.api_calls()[0]["path"], "/api/now/table/incident")
+        self.assertIn("INC1", self.out)
+
+    def test_a_table_without_ticket_numbers_is_refused(self):
+        self.server.routes[("GET", "/api/now/table/sys_user")] = FakeResponse(result=[row(name="x")])
+        self.assertDies("sys_user has no ticket numbers", self.run_main,
+                        "--table", "sys_user", "--query", "active=true")
+
+    def test_limit_is_sent_and_the_cut_is_reported(self):
+        self.run_main("--search", "disk")
+        self.assertEqual(self.server.api_calls()[0]["params"]["sysparm_limit"], "50")
+        self.server.calls.clear()
+        self.run_main("--search", "disk", "--limit", "4")
+        self.assertEqual(self.server.api_calls()[0]["params"]["sysparm_limit"], "4")
+        self.assertIn("showing the first 4", self.out)
+
+    def test_json(self):
+        self.run_main("--search", "disk", "-j")
+        out = json.loads(self.out)
+        self.assertEqual([t["number"] for t in out], ["INC1", "INC2", "PRB1", "SCTASK1"])
+        self.assertNotIn("_raw", out[0])
+
+
 class MainArgsTest(ServerTestCase):
 
     def setUp(self):
         super().setUp()
         self.serve()
+
+    def test_search_needs_some_text(self):
+        self.assertUsageError("--search needs some text", "--search", " ")
+
+    def test_search_and_query_are_alternatives(self):
+        self.assertUsageError("not allowed with", "--search", "x", "--query", "active=true")
+
+    def test_search_options_need_a_search(self):
+        for opt in (["--in", "desc"], ["--table", "incident"], ["--limit", "5"]):
+            with self.subTest(opt=opt):
+                self.assertUsageError("need --search or --query", *opt)
+
+    def test_in_desc_is_for_search_text(self):
+        self.assertUsageError("--in is for --search", "--query", "active=true", "--in", "desc")
+
+    def test_query_is_used_as_written(self):
+        self.assertUsageError("-g/-u do not apply to --query", "--query", "active=true", "-g")
+
+    def test_search_includes_resolved_tickets_already(self):
+        self.assertUsageError("always include resolved tickets", "--search", "x", "-a")
+
+    def test_search_stands_alone(self):
+        self.assertUsageError("--search and --query stand alone", "INC1", "--search", "x")
+        self.assertUsageError("--search and --query stand alone", "--query", "active=true", "-m", "x")
+
+    def test_limit_is_a_positive_number(self):
+        self.assertUsageError("--limit must be 1 or more", "--search", "x", "--limit", "0")
 
     def test_no_instance(self):
         self.patch(sleet, "INSTANCE", "")

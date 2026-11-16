@@ -147,6 +147,23 @@ In Safari, turn on the Develop menu first: **Settings** > **Advanced** > **Show 
 | `sleet INC0012345 -w` | The ticket in your browser |
 | `sleet -j` | JSON output, combinable with the others |
 
+### Search tickets
+
+The board only shows your own tickets. To find any ticket you can read, resolved ones included:
+
+```bash
+sleet --search "certificate"                    # number or short description contains the text
+sleet --search "certificate" --in desc          # the description as well (slower)
+sleet --search "certificate" -g                 # only in your assignment groups
+sleet --table incident --query "category=network^priority=1"
+sleet --search "certificate" --limit 200 -j
+```
+
+- **`--search`:** matches the number and the short description, newest first. A `^` in the text is escaped, so it can't add query terms.
+- **`--query`:** sends an encoded query as written, for example one copied from a ServiceNow list filter. It is sorted newest first unless it has its own `ORDERBY`. `-g` and `-u` don't apply: put the group in the query.
+- **`--table`:** the table to search. The default, `task`, holds every kind of ticket. Use a table such as `incident` to filter on its own fields.
+- **`--limit`:** how many rows to show. The default is 50, and `sleet` says when it cut the list.
+
 ## Update tickets
 
 Every write shows a preview and asks for confirmation. Press `v` to view the full text first. After writing, `sleet` reads the record back and reports any field that ServiceNow didn't accept.

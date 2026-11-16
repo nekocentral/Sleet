@@ -32,7 +32,7 @@ try:
 except ImportError:
     yaml = None
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 PLATFORM = sys.platform          # one place to ask which system this is (the tests switch it)
 FILE_MODES = os.name == "posix"  # Windows has no owner-only permission bits to check or set
@@ -565,15 +565,16 @@ def call(s, method, path, soft=False, **kw):
         die(f"unexpected response from {BASE} (not JSON) - is the session still valid? {REFRESH}")
 
 
-def get(s, table, query, fields, soft=False):
+def get(s, table, query, fields, soft=False, limit=None):
     out = []
     while True:
+        size = min(PAGE, limit - len(out)) if limit else PAGE
         page = call(s, "GET", f"/api/now/table/{table}", soft=soft, params={
             "sysparm_query": query,
             "sysparm_fields": fields,
             "sysparm_display_value": "all",
             "sysparm_exclude_reference_link": "true",
-            "sysparm_limit": str(PAGE),
+            "sysparm_limit": str(size),
             "sysparm_offset": str(len(out)),
         })
         if not isinstance(page, list):                   # soft lookup refused
@@ -582,7 +583,7 @@ def get(s, table, query, fields, soft=False):
             d = {k: clean(v.get("display_value") if isinstance(v, dict) else v) or "" for k, v in row.items()}
             d["_raw"] = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in row.items()}
             out.append(d)
-        if len(page) < PAGE:
+        if len(page) < size or (limit and len(out) >= limit):
             return out
         if len(out) >= MAX_ROWS:
             print(f"[sleet] warning: {table} has more than {MAX_ROWS} matches, showing the first {len(out)}",
@@ -728,6 +729,36 @@ def flat(s, a):
     for t in rows:
         print(task_line(t))
     print(f"\n{len(rows)} tickets")
+
+
+SEARCH_LIMIT = 50   # rows --search and --query show unless --limit says otherwise
+
+
+def search(s, a):
+    """Find tickets by text (--search) or by an encoded query as written (--query), resolved ones included."""
+    table = a.table or "task"
+    limit = a.limit or SEARCH_LIMIT
+    if a.search is not None:
+        text = a.search.strip().replace("^", "^^")           # a literal ^ must not start a new query term
+        terms = [f"short_descriptionLIKE{text}", f"numberLIKE{text}"]
+        if a.in_ == "desc":
+            terms.append(f"descriptionLIKE{text}")
+        who = (f"assignment_group={MY_GROUPS}^assigned_toISEMPTY^" if a.unassigned
+               else f"assignment_group={MY_GROUPS}^" if a.group else "")
+        query = who + "^OR".join(terms) + "^ORDERBYDESCsys_updated_on"
+    else:
+        query = a.query if "ORDERBY" in a.query else a.query + "^ORDERBYDESCsys_updated_on"
+    rows = get(s, table, query, TASK_FIELDS, limit=limit)
+    if rows and "number" not in rows[0]:
+        die(f"{table} has no ticket numbers - --table takes a table of tickets, such as incident or change_request")
+    if a.json:
+        return print(json.dumps(strip(rows), indent=2))
+    for t in rows:
+        print(task_line(t, None if table == "task" else table))
+    if len(rows) >= limit:
+        print(f"\nshowing the first {len(rows)} matches - narrow the search or raise --limit")
+    else:
+        print(f"\n{len(rows)} match{'' if len(rows) == 1 else 'es'}")
 
 
 def changes(s, a):
@@ -1181,6 +1212,10 @@ def main():
     mode.add_argument("-c", "--changes", action="store_true", help="changes assigned to or requested by you")
     mode.add_argument("-i", "--pick", action="store_true", help="interactive picker (fzf) with preview")
     mode.add_argument("-f", "--flat", action="store_true", help="single list instead of the board")
+    mode.add_argument("--search", metavar="TEXT",
+                      help="find tickets whose number or short description contains TEXT, resolved ones too")
+    mode.add_argument("--query", metavar="ENCODED",
+                      help="find tickets with an encoded query as written, e.g. 'active=true^priority=1'")
     p.add_argument("-V", "--version", action="version", version=f"sleet {__version__}")
     p.add_argument("-g", "--group", action="store_true", help="your assignment groups instead of you")
     p.add_argument("-u", "--unassigned", action="store_true",
@@ -1192,6 +1227,12 @@ def main():
     p.add_argument("-w", "--web", action="store_true", help="with a number: open it in the browser")
     p.add_argument("-n", "--notes", type=int, default=5, metavar="N",
                    help="with a number: activity entries to show (0 = all, default 5)")
+    q = p.add_argument_group("search (with --search or --query)")
+    q.add_argument("--in", dest="in_", choices=["desc"],
+                   help="with --search: look in the description as well (slower)")
+    q.add_argument("--table", metavar="TABLE",
+                   help="table of tickets to search (default: task, which holds every kind), e.g. incident")
+    q.add_argument("--limit", type=int, metavar="N", help=f"rows to show (default {SEARCH_LIMIT})")
     k = p.add_argument_group("session cookie")
     k.add_argument("--refresh-cookie", action="store_true",
                    help="first copy your ServiceNow session from the browser into the cookie file")
@@ -1247,6 +1288,21 @@ def main():
         p.error("only one of --note/--comment/--desc/--preset can read stdin")
     if a.browser and not a.refresh_cookie:
         p.error("--browser needs --refresh-cookie")
+    searching = a.search is not None or a.query is not None
+    if (a.in_ or a.table or a.limit is not None) and not searching:
+        p.error("--in, --table and --limit need --search or --query")
+    if searching and (a.number or a.new or writing(a) or a.fields or a.template):
+        p.error("--search and --query stand alone")
+    if a.search is not None and not a.search.strip():
+        p.error("--search needs some text")
+    if a.in_ and a.search is None:
+        p.error("--in is for --search; --query is used as written")
+    if a.query is not None and (a.group or a.unassigned):
+        p.error("-g/-u do not apply to --query; put the group in the query")
+    if searching and a.all:
+        p.error("--search and --query always include resolved tickets; -a has no effect")
+    if a.limit is not None and a.limit < 1:
+        p.error("--limit must be 1 or more")
 
     if a.refresh_cookie:
         refresh_cookie(a.browser)
@@ -1257,6 +1313,8 @@ def main():
         make_template(s, a)
     elif a.new:
         create(s, a)
+    elif searching:
+        search(s, a)
     elif a.number:
         show(s, a)
     elif a.changes:
