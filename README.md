@@ -32,15 +32,13 @@ Sleet reads and updates ServiceNow tickets from your terminal. It uses the same 
       -o ~/.config/sleet/config.json
     ```
 
-3. Save your session cookie:
-    1. Sign in to ServiceNow in your browser.
-    2. Open the developer tools, go to **Network**, and reload the page.
-    3. Select any request to your instance and copy the full value of the `Cookie` request header.
-    4. Save it:
+3. Sign in to ServiceNow in your browser, and save your session cookie. On macOS with Chrome, Edge or Firefox:
 
-        ```bash
-        pbpaste > ~/.config/sleet/cookie && chmod 600 ~/.config/sleet/cookie   # Linux: xclip -o
-        ```
+    ```bash
+    sleet --refresh-cookie
+    ```
+
+    For Safari and Linux, see [Session cookie](#session-cookie).
 
 4. Run `sleet -f`. You see a list of your active tickets.
 
@@ -54,6 +52,41 @@ Clone the repository and run the installer. It creates a private virtual environ
 git clone https://github.com/nekocentral/sleet ~/src/sleet
 ~/src/sleet/install.sh
 ```
+
+## Session cookie
+
+Sleet uses the session of your browser, so when that session expires, you sign in to ServiceNow in your browser again and save the new cookie. `sleet` tells you when this is needed.
+
+### macOS: Chrome, Edge or Firefox
+
+```bash
+sleet --refresh-cookie                     # tries Chrome, Edge and Firefox in turn
+sleet --refresh-cookie --browser firefox   # one browser only
+sleet --refresh-cookie -s                  # refresh, then continue with any other command
+```
+
+Sleet reads the cookies of your instance from the browser's cookie store, checks that the session works, and only then saves it. No browser settings are needed: Chrome, Edge and Firefox keep the session on disk while they run.
+
+Chrome and Edge encrypt their cookies with a key in your Keychain. The first time, macOS asks whether `security` may use "Chrome Safe Storage" (or "Microsoft Edge Safe Storage"). **Always Allow** stops the question, but then any program that runs as you can read that key. **Allow** asks again at the next refresh.
+
+### macOS: Safari
+
+Safari keeps the session in memory only, so Sleet reads it from the clipboard:
+
+1. Turn on the Develop menu: **Settings** > **Advanced** > **Show features for web developers**.
+2. On a ServiceNow page, select **Develop** > **Show Web Inspector** > **Network**, and reload the page.
+3. Right-click a request to your instance and select **Copy as cURL**.
+4. Run `sleet --refresh-cookie --browser safari`.
+
+### Linux, or by hand
+
+1. Open the developer tools, go to **Network**, and reload the page.
+2. Select any request to your instance and copy the full value of the `Cookie` request header.
+3. Save it:
+
+    ```bash
+    pbpaste > ~/.config/sleet/cookie && chmod 600 ~/.config/sleet/cookie   # Linux: xclip -o
+    ```
 
 ## Read tickets
 
@@ -126,7 +159,7 @@ All configuration lives in `~/.config/sleet/` (or `$XDG_CONFIG_HOME/sleet/`):
 | File | Purpose |
 | --- | --- |
 | `config.json` | Instance, presets, templates for `--new`, extra fields for the detail view |
-| `cookie` | Your session. Treat it as a password. |
+| `cookie` | Your session, written by `sleet --refresh-cookie` or by hand. Treat it as a password. |
 | `token` | The session token, cached by `sleet` so commands start faster. Treat it as a password. |
 | `sections.json` | Optional: custom board sections, one encoded query each |
 
@@ -178,6 +211,7 @@ Without `sections.json`, the board groups tickets by type. With it, every sectio
 ## Security
 
 - Keep `~/.config/sleet/cookie` private (`chmod 600`). Anyone who has it can act as you until the session expires.
+- `--refresh-cookie` reads only the cookies your browser would send to your instance, sends them only to your instance to check them, and writes the cookie file with `chmod 600`. Chrome and Edge also need access to the browser's key in your Keychain.
 - Writes go to production under your name. Don't use `-y` in scripts that touch many tickets.
 - Never commit `cookie`, `token`, `config.json` or `sections.json`. The `.gitignore` excludes them.
 - Ticket text is shown with control characters removed, so a ticket can't send escape sequences to your terminal. This also applies to `-j` output.
