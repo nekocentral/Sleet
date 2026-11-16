@@ -9,7 +9,7 @@ Sleet reads and updates ServiceNow tickets from your terminal. It uses the same 
 
 ## Requirements
 
-- macOS, Linux or Windows with Python 3.9 or later.
+- macOS, Linux or Windows with Python 3.9 or later. Windows support is experimental, see [Windows notes](#windows-notes).
 - Optional: [fzf](https://github.com/junegunn/fzf) for the interactive picker, and `jq` for scripting with `-j`.
 - Optional: [PyYAML](https://pypi.org/project/PyYAML/), for a [YAML configuration](#yaml-instead-of-json).
 
@@ -115,6 +115,8 @@ In Safari, turn on the Develop menu first: **Settings** > **Advanced** > **Show 
 3. Save that one line as `~/.config/sleet/cookie`. On macOS and Linux, make it private with `chmod 600 ~/.config/sleet/cookie`.
 
 ## Windows notes
+
+> **Experimental:** Sleet passes its automated tests on Windows, but it hasn't been used day to day on a real Windows machine yet. Expect rough edges, mainly around the console and the clipboard. If something doesn't work, [open an issue](https://github.com/nekocentral/sleet/issues) with the command you ran and the message you got. Leave out cookie values and anything else from your instance that isn't public.
 
 - **Install:** use pipx or uv. `install.sh` is for macOS and Linux.
 - **Configuration folder:** `%USERPROFILE%\.config\sleet`, the same place as on the other systems.
