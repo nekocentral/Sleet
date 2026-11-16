@@ -591,7 +591,7 @@ class GetTest(ServerTestCase):
 
 TASKS = [
     row(number="INC1", sys_class_name="incident", state="In Progress", priority="3", sys_id="1",
-        short_description="disk full", sys_updated_on="2026-11-13 10:00:00"),
+        short_description="disk full", sys_updated_on="2026-11-13 10:00:00", assigned_to="Ann Admin"),
     row(number="INC2", sys_class_name="incident", state="Resolved", priority="3", sys_id="2",
         short_description="done", sys_updated_on="2026-11-12 10:00:00"),
     row(number="PRB1", sys_class_name="problem", state="New", priority="2", sys_id="3",
@@ -601,7 +601,7 @@ TASKS = [
 ]
 CHANGES = [
     row(number="CHG1", type="standard", state="Scheduled", approval="Approved", start_date="2026-11-14",
-        sys_id="5", short_description="patch", risk="Low", end_date=""),
+        sys_id="5", short_description="patch", risk="Low", end_date="", assigned_to="Ann Admin"),
     row(number="CHG2", type="normal", state="Assess", approval="Requested", start_date="2026-11-15",
         sys_id="6", short_description="upgrade", risk="High", end_date=""),
 ]
@@ -622,6 +622,40 @@ class BoardTest(ServerTestCase):
     def test_all_includes_resolved(self):
         self.run_main("-s", "-a")
         self.assertTrue(self.out.startswith("INC 2  ·"))
+
+    def line(self, number):
+        return next(line for line in self.out.splitlines() if number in line)
+
+    def out_reset(self):
+        self._out.seek(0)
+        self._out.truncate()
+
+    def test_group_board_shows_who_has_each_ticket(self):
+        self.run_main("-g")
+        self.assertIn("Ann Admin", self.line("INC1"))
+        self.assertIn("Ann Admin", self.line("CHG1"))
+        self.assertRegex(self.line("PRB1"), r"New\s+-\s")             # nobody has it
+        self.assertRegex(self.line("CHG2"), r"Assess\s+-\s")
+
+    def test_assignee_is_only_shown_with_g(self):
+        for argv in ((), ("-u",), ("-a",)):
+            with self.subTest(argv=argv):
+                self.out_reset()
+                self.run_main(*argv)
+                self.assertNotIn("Ann Admin", self.out)
+
+    def test_group_flat_list_and_changes_show_the_assignee(self):
+        for argv in (("-f", "-g"), ("-c", "-g")):
+            with self.subTest(argv=argv):
+                self.out_reset()
+                self.run_main(*argv)
+                self.assertIn("Ann Admin", self.out)
+
+    def test_assignee_is_fetched_and_in_the_json(self):
+        self.run_main("-j", "-g")
+        for call in self.server.api_calls():
+            self.assertIn("assigned_to", call["params"]["sysparm_fields"])
+        self.assertEqual(json.loads(self.out)["Incidents"][0]["assigned_to"], "Ann Admin")
 
     def test_json_groups_by_section(self):
         self.run_main("-j")

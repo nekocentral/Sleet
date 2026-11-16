@@ -32,7 +32,7 @@ try:
 except ImportError:
     yaml = None
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 PLATFORM = sys.platform          # one place to ask which system this is (the tests switch it)
 FILE_MODES = os.name == "posix"  # Windows has no owner-only permission bits to check or set
@@ -106,8 +106,8 @@ PRESETS = CFG.get("presets", {})
 ME = "javascript:gs.getUserID()"
 MY_GROUPS = "javascript:getMyGroups()"
 
-TASK_FIELDS = "sys_id,number,sys_class_name,short_description,state,priority,sys_updated_on"
-CHG_FIELDS = "sys_id,number,type,state,risk,approval,start_date,end_date,short_description"
+TASK_FIELDS = "sys_id,number,sys_class_name,short_description,state,priority,sys_updated_on,assigned_to"
+CHG_FIELDS = "sys_id,number,type,state,risk,approval,start_date,end_date,short_description,assigned_to"
 # state labels hidden unless -a; override with "done_states" in config.json (e.g. non-English instances)
 DONE = set(CFG.get("done_states") or ["Resolved", "Closed", "Cancelled", "Canceled",
                                       "Closed Complete", "Closed Incomplete", "Closed Skipped"])
@@ -619,14 +619,19 @@ def num_cell(t, width, table=None):
     return cell + " " * max(1, width - len(n))
 
 
-def task_line(t, table=None):
-    return (f"  {num_cell(t, 14, table)}{t['priority'][:12]:<12} {t['state'][:14]:<14} "
-            f"{t['sys_updated_on'][:16]:<16}  {t['short_description'][:70]}")
+def owner_cell(t):
+    return f"{(t.get('assigned_to') or '-')[:16]:<16} "
 
 
-def chg_line(ch):
-    return (f"  {num_cell(ch, 14, 'change_request')}{ch['state'][:12]:<12} {ch['approval'][:10]:<10} "
-            f"{ch['start_date'][:16]:<16}  {ch['short_description'][:70]}")
+def task_line(t, table=None, who=False):
+    """One ticket; who adds the assignee after the state and makes room by shortening the title."""
+    return (f"  {num_cell(t, 14, table)}{t['priority'][:12]:<12} {t['state'][:14]:<14} {owner_cell(t) if who else ''}"
+            f"{t['sys_updated_on'][:16]:<16}  {t['short_description'][:54 if who else 70]}")
+
+
+def chg_line(ch, who=False):
+    return (f"  {num_cell(ch, 14, 'change_request')}{ch['state'][:12]:<12} {owner_cell(ch) if who else ''}"
+            f"{ch['approval'][:10]:<10} {ch['start_date'][:16]:<16}  {ch['short_description'][:54 if who else 70]}")
 
 
 def strip(rows):
@@ -665,15 +670,15 @@ def board(s, a):
             print(f"\n{c('1', label)}  standard {count(len(std))}  non-standard {count(len(nonstd))}")
             for tag, rows in (("std", std), ("non-std", nonstd)):
                 for ch in rows:
-                    print(chg_line(ch) + c("2", f"  [{tag}]"))
+                    print(chg_line(ch, a.group) + c("2", f"  [{tag}]"))
             continue
         rows = buckets[cls]
         print(f"\n{c('1', label)}  {count(len(rows))}")
         for t in rows:
-            print(task_line(t))
+            print(task_line(t, who=a.group))
     print(f"\n{c('1', 'Other')}  {count(len(other))}")
     for t in other:
-        print(task_line(t))
+        print(task_line(t, who=a.group))
 
 
 LINE_FIELDS = "sys_id,number,short_description,state,priority,sys_updated_on"
@@ -727,7 +732,7 @@ def flat(s, a):
     if a.json:
         return print(json.dumps(strip(rows), indent=2))
     for t in rows:
-        print(task_line(t))
+        print(task_line(t, who=a.group))
     print(f"\n{len(rows)} tickets")
 
 
@@ -766,7 +771,7 @@ def changes(s, a):
     if a.json:
         return print(json.dumps(strip(rows), indent=2))
     for ch in rows:
-        print(chg_line(ch) + c("2", f"  [{ch['type']}]"))
+        print(chg_line(ch, a.group) + c("2", f"  [{ch['type']}]"))
     print(f"\n{len(rows)} active changes")
 
 

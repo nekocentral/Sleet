@@ -138,7 +138,7 @@ In Safari, turn on the Develop menu first: **Settings** > **Advanced** > **Show 
 | --- | --- |
 | `sleet` | A board grouped by ticket type, assigned to you |
 | `sleet -s` | Board counts on one line |
-| `sleet -g` | The board for your assignment groups |
+| `sleet -g` | The board for your assignment groups, with who has each ticket (`-` when nobody does). Also works with `-f` and `-c` |
 | `sleet -u` | Unassigned tickets in your groups |
 | `sleet -f` / `sleet -c` | A flat list / changes only |
 | `sleet -a` | Include resolved items |
