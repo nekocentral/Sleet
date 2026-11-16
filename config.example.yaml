@@ -1,0 +1,46 @@
+---
+# Copy to ~/.config/sleet/config.yaml and adjust (needs PyYAML; see "YAML instead of JSON" in README.md).
+# Field values are display labels, case-sensitive. Quote a label that YAML reads as a boolean, such as
+# "Yes", "No", "On" or "Off": unquoted, sleet would send "true" or "false".
+instance: yourinstance
+
+detail_fields:
+  - [u_example_field, Example label]
+
+presets:
+  resolve:
+    # sleet INC... -r "close notes"
+    tables: [incident]
+    required: [close_code]
+    fields:
+      state: Resolved
+      close_code: Solved (Permanently)
+    notes_field: close_notes
+
+  review:
+    # sleet CHG... --review "close notes" --hours 4
+    tables: [change_request]
+    fields:
+      state: Review
+      close_code: Successful
+    notes_field: close_notes
+    hours_field: u_example_hours
+    require_hours: false
+
+templates:
+  # sleet --new inc -t "title" [--desc ...] [--set ...]; values are display labels.
+  # Generate one with: sleet --template incident
+  inc:
+    table: incident
+    required: [assignment_group, caller_id]
+    fields:
+      impact: 3 - Low
+      urgency: 3 - Low
+      assignment_group: Your Team
+      caller_id: ""          # left empty on purpose: pass --set caller_id="Full Name" per ticket
+
+  chg:
+    table: change_request
+    fields:
+      type: Normal
+      assignment_group: Your Team

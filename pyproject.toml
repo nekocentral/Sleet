@@ -20,6 +20,9 @@ classifiers = [
   "Programming Language :: Python :: 3",
 ]
 
+[project.optional-dependencies]
+yaml = ["pyyaml>=5.1"]   # only for a config.yaml or sections.yaml
+
 [project.urls]
 Homepage = "https://github.com/nekocentral/sleet"
 Issues = "https://github.com/nekocentral/sleet/issues"
