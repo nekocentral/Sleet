@@ -32,7 +32,7 @@ try:
 except ImportError:
     yaml = None
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 PLATFORM = sys.platform          # one place to ask which system this is (the tests switch it)
 FILE_MODES = os.name == "posix"  # Windows has no owner-only permission bits to check or set
@@ -759,7 +759,7 @@ def search(s, a):
     if a.json:
         return print(json.dumps(strip(rows), indent=2))
     for t in rows:
-        print(task_line(t, None if table == "task" else table))
+        print(task_line(t, None if table == "task" else table, who=True))
     if len(rows) >= limit:
         print(f"\nshowing the first {len(rows)} matches - narrow the search or raise --limit")
     else:

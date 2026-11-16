@@ -163,6 +163,7 @@ sleet --search "certificate" --limit 200 -j
 - **`--query`:** sends an encoded query as written, for example one copied from a ServiceNow list filter. It is sorted newest first unless it has its own `ORDERBY`. `-g` and `-u` don't apply: put the group in the query.
 - **`--table`:** the table to search. The default, `task`, holds every kind of ticket. Use a table such as `incident` to filter on its own fields.
 - **`--limit`:** how many rows to show. The default is 50, and `sleet` says when it cut the list.
+- **Assignee:** every result shows who has the ticket, or `-` when nobody does.
 
 ## Update tickets
 

@@ -924,6 +924,21 @@ class SearchTest(ServerTestCase):
             self.assertIn(number, self.out)
         self.assertIn("4 matches", self.out)
 
+    def test_search_shows_who_has_each_ticket(self):
+        self.run_main("--search", "disk")
+        lines = {line.split()[0]: line for line in self.out.splitlines() if line.startswith("  ")}
+        self.assertIn("Ann Admin", lines["INC1"])
+        self.assertRegex(lines["PRB1"], r"New\s+-\s")                 # nobody has it
+
+    def test_query_shows_who_has_each_ticket(self):
+        self.run_main("--query", "active=true")
+        self.assertIn("Ann Admin", self.out)
+
+    def test_search_in_another_table_shows_the_assignee_too(self):
+        self.server.routes[("GET", "/api/now/table/incident")] = FakeResponse(result=TASKS[:1])
+        self.run_main("--table", "incident", "--query", "active=true")
+        self.assertIn("Ann Admin", self.out)
+
     def test_search_with_no_matches(self):
         self.server.routes[("GET", "/api/now/table/task")] = FakeResponse(result=[])
         self.run_main("--search", "nothing")
