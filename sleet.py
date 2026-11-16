@@ -759,7 +759,7 @@ def search(s, a):
     if a.json:
         return print(json.dumps(strip(rows), indent=2))
     for t in rows:
-        print(task_line(t, None if table == "task" else table))
+        print(task_line(t, None if table == "task" else table, who=True))
     if len(rows) >= limit:
         print(f"\nshowing the first {len(rows)} matches - narrow the search or raise --limit")
     else:
