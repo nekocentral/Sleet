@@ -26,7 +26,7 @@ from urllib.parse import quote
 
 import requests
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "sleet")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
@@ -227,32 +227,62 @@ def aes_decrypt(key, data):
     return out.raw[:n.value]
 
 
+# what a broken, half-written or unexpected browser file can raise: such a profile is skipped, not fatal
+READ_ERRORS = (sqlite3.Error, OSError, ValueError, KeyError, IndexError, TypeError)
+
+
+def unreadable(label, e):
+    note(f"{label}: cannot read its cookies ({e.__class__.__name__}), skipped")
+
+
+def cookie_header(cookies):
+    """Cookie header from (domain, name, value). A name set on several domains is sent once, with the
+    value of the domain closest to the instance, so a cookie on .service-now.com cannot hide the real one."""
+    best = {}
+    for domain, name, value in cookies:
+        rank = len(domain.lstrip("."))
+        if name not in best or rank >= best[name][0]:
+            best[name] = (rank, value)
+    return "; ".join(f"{name}={value}" for name, (_, value) in best.items())
+
+
 def chromium_cookies(browser):
     """Chrome and Edge write session cookies to disk while they run; the values are encrypted."""
     root, keychain = CHROMIUM[browser]
     key = None
     now = (time.time() + 11644473600) * 1_000_000          # Chromium counts microseconds since 1601
     for db in sorted(glob.glob(os.path.join(APP_SUPPORT, root, "*", "Cookies"))):
-        with db_copy(db) as con:
-            version = int(con.execute("SELECT value FROM meta WHERE key = 'version'").fetchone()[0])
-            rows = [r for r in con.execute(
-                "SELECT host_key, name, value, encrypted_value FROM cookies WHERE host_key LIKE "
-                "'%service-now.com' AND (expires_utc = 0 OR expires_utc > ?)", (now,)) if for_instance(r[0])]
-        if not rows:
+        label = f"{browser} ({os.path.basename(os.path.dirname(db))})"
+        try:
+            with db_copy(db) as con:
+                version = int(con.execute("SELECT value FROM meta WHERE key = 'version'").fetchone()[0])
+                rows = [r for r in con.execute(
+                    "SELECT host_key, name, value, encrypted_value FROM cookies WHERE host_key LIKE "
+                    "'%service-now.com' AND (expires_utc = 0 OR expires_utc > ?)", (now,)) if for_instance(r[0])]
+            if not rows:
+                continue
+            if key is None:                                 # first use asks for Keychain access
+                pw = subprocess.run(["security", "find-generic-password", "-w", "-s", keychain],
+                                    capture_output=True, text=True)
+                if pw.returncode:
+                    return note(f"{browser}: no access to '{keychain}' in your Keychain")
+                key = hashlib.pbkdf2_hmac("sha1", pw.stdout.strip().encode(), b"saltysalt", 1003, 16)
+            jar, unknown = [], 0
+            for host, name, value, enc in rows:
+                if enc[:3] == b"v10":
+                    value = aes_decrypt(key, enc[3:])
+                    value = (value[32:] if version >= 24 else value).decode()   # 24+: SHA-256 of the domain first
+                elif enc:                                   # a format this code does not know: never send it empty
+                    unknown += 1
+                    continue
+                jar.append((host, name, value))
+            if unknown:
+                note(f"{label}: left out {unknown} cookie{'s' * (unknown != 1)} in an unknown format")
+        except READ_ERRORS as e:
+            unreadable(label, e)
             continue
-        if key is None:                                     # first use asks for Keychain access
-            pw = subprocess.run(["security", "find-generic-password", "-w", "-s", keychain],
-                                capture_output=True, text=True)
-            if pw.returncode:
-                return note(f"{browser}: no access to '{keychain}' in your Keychain")
-            key = hashlib.pbkdf2_hmac("sha1", pw.stdout.strip().encode(), b"saltysalt", 1003, 16)
-        jar = []
-        for _, name, value, enc in rows:
-            if enc[:3] == b"v10":
-                value = aes_decrypt(key, enc[3:])
-                value = (value[32:] if version >= 24 else value).decode()   # 24+: SHA-256 of the domain first
-            jar.append(f"{name}={value}")
-        yield f"{browser} ({os.path.basename(os.path.dirname(db))})", "; ".join(jar)
+        if jar:
+            yield label, cookie_header(jar)
 
 
 def lz4_block(src):
@@ -288,32 +318,49 @@ def lz4_block(src):
                 out.append(out[start + k])
 
 
+def firefox_profile(prof):
+    """(domain, name, value) of one Firefox profile: persistent cookies plus the session store."""
+    jar = []
+    if os.path.exists(prof + "cookies.sqlite"):
+        with db_copy(prof + "cookies.sqlite") as con:       # expiry is in seconds, or milliseconds in newer versions
+            jar += [row for row in con.execute(
+                "SELECT host, name, value FROM moz_cookies WHERE host LIKE '%service-now.com' AND "
+                "CASE WHEN expiry > 99999999999 THEN expiry / 1000 ELSE expiry END > ?", (time.time(),))
+                if for_instance(row[0])]
+    # session cookies (the session itself) live only in the session store, saved every 15 s
+    for store in ("sessionstore-backups/recovery.jsonlz4", "sessionstore.jsonlz4"):
+        if os.path.exists(prof + store):
+            with open(prof + store, "rb") as f:
+                data = f.read()
+            if data[:8] == b"mozLz40\0":                      # then 4 bytes of size, then the block
+                jar += [(ck["host"], ck["name"], ck.get("value", ""))
+                        for ck in json.loads(lz4_block(data[12:])).get("cookies", [])
+                        if for_instance(ck.get("host", ""))]
+            break
+    return jar
+
+
 def firefox_cookies():
     for prof in sorted(glob.glob(os.path.join(APP_SUPPORT, "Firefox", "Profiles", "*", ""))):
-        jar = []
-        if os.path.exists(prof + "cookies.sqlite"):
-            with db_copy(prof + "cookies.sqlite") as con:
-                jar += [f"{n}={v}" for h, n, v in con.execute(
-                    "SELECT host, name, value FROM moz_cookies WHERE host LIKE '%service-now.com'")
-                    if for_instance(h)]
-        # session cookies (the session itself) live only in the session store, saved every 15 s
-        for store in ("sessionstore-backups/recovery.jsonlz4", "sessionstore.jsonlz4"):
-            if os.path.exists(prof + store):
-                with open(prof + store, "rb") as f:
-                    data = f.read()
-                if data[:8] == b"mozLz40\0":                  # then 4 bytes of size, then the block
-                    jar += [f"{ck['name']}={ck['value']}" for ck in json.loads(lz4_block(data[12:]))
-                            .get("cookies", []) if for_instance(ck["host"])]
-                break
+        label = f"firefox ({os.path.basename(prof.rstrip('/'))})"
+        try:
+            jar = firefox_profile(prof)
+        except READ_ERRORS as e:
+            unreadable(label, e)
+            continue
         if jar:
-            yield f"firefox ({os.path.basename(prof.rstrip('/'))})", "; ".join(jar)
+            yield label, cookie_header(jar)
+
+
+# a bare clipboard line counts as a Cookie header only if it is nothing but name=value pairs
+COOKIE_PAIRS = re.compile(r"[!#$%&'*+\-.^_`|~\w]+=[^;\s]*(?:;\s*[!#$%&'*+\-.^_`|~\w]+=[^;\s]*)*;?")
 
 
 def safari_cookies():
     """Safari never writes session cookies to disk, so read a 'Copy as cURL' from the clipboard."""
     text = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout.strip()
     m = re.search(r"(?:-b|--cookie)\s+\$?'([^']+)'|cookie:\s*([^'\"\r\n]+)", text, re.I)
-    raw = (m.group(1) or m.group(2)).strip() if m else text if "=" in text and "\n" not in text else ""
+    raw = (m.group(1) or m.group(2)).strip() if m else text if COOKIE_PAIRS.fullmatch(text) else ""
     if not raw:
         die(f"no cookie on the clipboard. {SAFARI_HELP}")
     yield "the clipboard", raw

@@ -974,6 +974,58 @@ class ChromiumCookiesTest(QuietTestCase):
     def test_browser_not_installed(self):
         self.assertEqual(self.read(), [])
 
+    def cookies_file(self, name="Default"):
+        return os.path.join(sleet.APP_SUPPORT, "Google/Chrome", name, "Cookies")
+
+    def test_a_corrupt_profile_is_skipped_and_the_next_one_is_still_read(self):
+        os.makedirs(os.path.dirname(self.cookies_file()))
+        with open(self.cookies_file(), "wb") as f:
+            f.write(b"not a database at all" * 50)
+        self.profile([(HOST, "a", "1", 0)], name="Profile 1")
+        self.assertEqual(self.read(), [("chrome (Profile 1)", "a=1")])
+        self.assertIn("chrome (Default): cannot read its cookies (DatabaseError), skipped", self.err)
+
+    def test_a_profile_without_a_version_is_skipped(self):
+        self.profile([(HOST, "a", "1", 0)])
+        with sqlite3.connect(self.cookies_file()) as con:
+            con.execute("DELETE FROM meta")
+        self.profile([(HOST, "b", "2", 0)], name="Profile 1")
+        self.assertEqual(self.read(), [("chrome (Profile 1)", "b=2")])
+        self.assertIn("chrome (Default): cannot read its cookies (TypeError), skipped", self.err)
+
+    def test_a_cookie_that_does_not_decrypt_skips_its_profile_only(self):
+        def decrypt(key, data):
+            if data.endswith(b"broken"):
+                raise ValueError("cannot decrypt cookie")
+            return data[len(b"ENC:"):]
+        self.patch(sleet, "aes_decrypt", decrypt)
+        self.profile([(HOST, "a", "broken", 0)])
+        self.profile([(HOST, "b", "2", 0)], name="Profile 1")
+        self.assertEqual(self.read(), [("chrome (Profile 1)", "b=2")])
+        self.assertIn("chrome (Default): cannot read its cookies (ValueError), skipped", self.err)
+
+    def test_a_value_that_decrypts_to_no_text_skips_its_profile(self):
+        self.patch(sleet, "aes_decrypt", lambda key, data: b"\xff\xfe" * 20)
+        self.profile([(HOST, "a", "1", 0)], version=23)
+        self.assertEqual(self.read(), [])
+        self.assertIn("cannot read its cookies (UnicodeDecodeError), skipped", self.err)
+
+    def test_an_unknown_encryption_format_is_left_out_and_never_sent_empty(self):
+        self.profile([(HOST, "known", "1", 0), (HOST, "future", "2", 0)],
+                     encrypt=lambda host, value: (b"v11" if value == "2" else b"v10ENC:" +
+                                                  hashlib.sha256(host.encode()).digest()) + value.encode())
+        self.assertEqual(self.read(), [("chrome (Default)", "known=1")])
+        self.assertIn("chrome (Default): left out 1 cookie in an unknown format", self.err)
+
+    def test_only_unknown_formats_yields_nothing(self):
+        self.profile([(HOST, "future", "2", 0)], encrypt=lambda host, value: b"v11" + value.encode())
+        self.assertEqual(self.read(), [])
+
+    def test_the_host_cookie_wins_over_one_set_on_the_parent_domain(self):
+        self.profile([(".service-now.com", "JSESSIONID", "tossed", 0), (HOST, "JSESSIONID", "real", 0),
+                      (HOST, "other", "o", 0), (".service-now.com", "other", "wide", 0)])
+        self.assertEqual(self.read(), [("chrome (Default)", "JSESSIONID=real; other=o")])
+
     @unittest.skipUnless(sys.platform == "darwin", "CommonCrypto is macOS only")
     def test_real_decryption(self):
         self.patch(sleet, "aes_decrypt", REAL_AES_DECRYPT)
@@ -987,8 +1039,9 @@ class FirefoxCookiesTest(QuietTestCase):
         d = os.path.join(sleet.APP_SUPPORT, "Firefox", "Profiles", name)
         os.makedirs(os.path.join(d, "sessionstore-backups"))
         con = sqlite3.connect(os.path.join(d, "cookies.sqlite"))
-        con.execute("CREATE TABLE moz_cookies (host, name, value)")
-        con.executemany("INSERT INTO moz_cookies VALUES (?, ?, ?)", persistent)
+        con.execute("CREATE TABLE moz_cookies (host, name, value, expiry)")
+        con.executemany("INSERT INTO moz_cookies VALUES (?, ?, ?, ?)",       # 3 values: expires in an hour
+                        [tuple(c) + (int(time.time()) + 3600,) * (4 - len(c)) for c in persistent])
         con.commit()
         con.close()
         if store:
@@ -1028,6 +1081,83 @@ class FirefoxCookiesTest(QuietTestCase):
         self.assertEqual(self.read(), [])
 
 
+class FirefoxRobustnessTest(QuietTestCase):
+
+    def profile_dir(self, name="abc.default"):
+        d = os.path.join(sleet.APP_SUPPORT, "Firefox", "Profiles", name)
+        os.makedirs(os.path.join(d, "sessionstore-backups"))
+        return d
+
+    def store(self, d, payload, path="sessionstore-backups/recovery.jsonlz4"):
+        with open(os.path.join(d, path), "wb") as f:
+            f.write(b"mozLz40\0" + len(payload).to_bytes(4, "little") + payload)
+
+    def cookies_db(self, d, rows):
+        con = sqlite3.connect(os.path.join(d, "cookies.sqlite"))
+        con.execute("CREATE TABLE moz_cookies (host, name, value, expiry)")
+        con.executemany("INSERT INTO moz_cookies VALUES (?, ?, ?, ?)", rows)
+        con.commit()
+        con.close()
+
+    def read(self):
+        return list(sleet.firefox_cookies())
+
+    def test_a_truncated_session_store_skips_that_profile_only(self):
+        self.store(self.profile_dir("a.broken"), b"\xf0")
+        good = json.dumps({"cookies": [{"host": HOST, "name": "JSESSIONID", "value": "s"}]}).encode()
+        self.store(self.profile_dir("b.good"), lz4_literals(good))
+        self.assertEqual(self.read(), [("firefox (b.good)", "JSESSIONID=s")])
+        self.assertIn("firefox (a.broken): cannot read its cookies (IndexError), skipped", self.err)
+
+    def test_a_session_store_that_is_not_json_is_skipped(self):
+        self.store(self.profile_dir(), lz4_literals(b"{not json"))
+        self.assertEqual(self.read(), [])
+        self.assertIn("cannot read its cookies (JSONDecodeError), skipped", self.err)
+
+    def test_a_corrupt_cookie_database_is_skipped(self):
+        d = self.profile_dir()
+        with open(os.path.join(d, "cookies.sqlite"), "wb") as f:
+            f.write(b"not a database at all" * 50)
+        self.assertEqual(self.read(), [])
+        self.assertIn("firefox (abc.default): cannot read its cookies (DatabaseError), skipped", self.err)
+
+    def test_a_session_cookie_without_a_value_is_empty_not_an_error(self):
+        entries = [{"host": HOST, "name": "flag"}, {"name": "no-host", "value": "x"}]
+        self.store(self.profile_dir(), lz4_literals(json.dumps({"cookies": entries}).encode()))
+        self.assertEqual(self.read(), [("firefox (abc.default)", "flag=")])
+
+    def test_expired_persistent_cookies_are_left_out_in_seconds_and_milliseconds(self):
+        now = int(time.time())
+        d = self.profile_dir()
+        self.cookies_db(d, [(HOST, "gone", "1", now - 60), (HOST, "gone_ms", "2", (now - 60) * 1000),
+                            (HOST, "kept", "3", now + 3600), (HOST, "kept_ms", "4", (now + 3600) * 1000)])
+        self.assertEqual(self.read(), [("firefox (abc.default)", "kept=3; kept_ms=4")])
+
+    def test_the_session_store_wins_over_a_persistent_cookie_of_the_same_name(self):
+        d = self.profile_dir()
+        self.cookies_db(d, [(HOST, "JSESSIONID", "persisted", int(time.time()) + 3600)])
+        live = json.dumps({"cookies": [{"host": HOST, "name": "JSESSIONID", "value": "live"}]}).encode()
+        self.store(d, lz4_literals(live))
+        self.assertEqual(self.read(), [("firefox (abc.default)", "JSESSIONID=live")])
+
+
+class CookieHeaderTest(unittest.TestCase):
+
+    def test_keeps_the_order_in_which_names_first_appear(self):
+        self.assertEqual(sleet.cookie_header([(HOST, "b", "2"), (HOST, "a", "1")]), "b=2; a=1")
+
+    def test_the_most_specific_domain_wins_whatever_the_order(self):
+        wide, host = (".service-now.com", "s", "wide"), (HOST, "s", "host")
+        self.assertEqual(sleet.cookie_header([wide, host]), "s=host")
+        self.assertEqual(sleet.cookie_header([host, wide]), "s=host")
+
+    def test_a_leading_dot_does_not_count(self):
+        self.assertEqual(sleet.cookie_header([("." + HOST, "s", "first"), (HOST, "s", "last")]), "s=last")
+
+    def test_nothing(self):
+        self.assertEqual(sleet.cookie_header([]), "")
+
+
 class SafariCookiesTest(QuietTestCase):
 
     def clipboard(self, text):
@@ -1055,6 +1185,16 @@ class SafariCookiesTest(QuietTestCase):
 
     def test_anything_else_explains_what_to_copy(self):
         self.assertDies("Copy as cURL", self.clipboard, "some notes\nfrom a meeting")
+
+    def test_unrelated_clipboard_text_is_never_taken_for_a_cookie(self):
+        for text in ("https://intranet.example/reset?token=SECRET123", "user@example.com: pass=word",
+                     "x = 1", "export API_KEY=abc def", "a=b, c=d"):
+            with self.subTest(text=text):
+                self.assertDies("no cookie on the clipboard", self.clipboard, text)
+
+    def test_a_bare_value_with_one_pair_and_a_trailing_semicolon(self):
+        self.assertEqual(self.clipboard("JSESSIONID=s;"), [("the clipboard", "JSESSIONID=s;")])
+        self.assertEqual(self.clipboard("glide.session-1=a%3Db"), [("the clipboard", "glide.session-1=a%3Db")])
 
 
 class SignedInTest(QuietTestCase):
@@ -1139,6 +1279,18 @@ class RefreshCookieTest(QuietTestCase):
         with self.assertRaises(SystemExit):
             sleet.refresh_cookie(None)
         self.assertNotIn("safari", self.read)
+
+    def test_one_unreadable_profile_does_not_stop_the_refresh(self):
+        self.patch(sleet, "BROWSERS", dict(sleet.BROWSERS, chrome=lambda: sleet.chromium_cookies("chrome")))
+        self.patch(sleet.subprocess, "run", FakeTools())
+        d = os.path.join(sleet.APP_SUPPORT, "Google/Chrome", "Default")
+        os.makedirs(d)
+        with open(os.path.join(d, "Cookies"), "wb") as f:
+            f.write(b"garbage" * 100)
+        sleet.refresh_cookie(None)
+        self.assertEqual(self.saved(), "good=2")
+        self.assertIn("chrome (Default): cannot read its cookies", self.err)
+        self.assertIn("cookie refreshed from edge (Default)", self.err)
 
     def test_failing_named_browser_has_no_safari_hint(self):
         self.patch(sleet, "signed_in", lambda raw: False)
