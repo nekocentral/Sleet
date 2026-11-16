@@ -151,6 +151,8 @@ class QuietTestCase(unittest.TestCase):
         self.patch(sys, "stdout", self._out)
         self.patch(sys, "stderr", self._err)
         for name, value in (("TTY", False), ("LINKS", False), ("CFG", {}), ("PRESETS", {}),
+                            ("PLATFORM", "darwin"),      # the browser tests describe macOS unless they say otherwise
+                            ("FILE_MODES", os.name == "posix"),
                             ("CONFIG_DIR", cfg),
                             ("CONFIG_FILE", os.path.join(cfg, "config.json")),
                             ("COOKIE_FILE", os.path.join(cfg, "cookie")),
@@ -397,6 +399,7 @@ class ReadCookieTest(QuietTestCase):
         self.write(sleet.COOKIE_FILE, "\n")
         self.assertDies("exactly one line", sleet.read_cookie)
 
+    @unittest.skipUnless(os.name == "posix", "Windows has no owner-only file permissions")
     def test_warns_when_others_can_read_it(self):
         self.write(sleet.COOKIE_FILE, "a=1", mode=0o644)
         sleet.read_cookie()
@@ -410,6 +413,7 @@ class ReadCookieTest(QuietTestCase):
 
 class TokenCacheTest(QuietTestCase):
 
+    @unittest.skipUnless(os.name == "posix", "Windows has no owner-only file permissions")
     def test_round_trip(self):
         sleet.save_token("k", "tok")
         self.assertEqual(sleet.cached_token("k"), "tok")
@@ -896,13 +900,19 @@ class MainArgsTest(ServerTestCase):
     def test_browser_needs_refresh_cookie(self):
         self.assertUsageError("--browser needs --refresh-cookie", "--browser", "chrome")
 
-    def test_refresh_cookie_is_macos_only(self):
-        self.patch(sys, "platform", "linux")
-        self.assertUsageError("--refresh-cookie reads macOS browsers", "--refresh-cookie")
+    def test_refresh_cookie_runs_on_every_system(self):
+        for system in ("linux", "win32", "darwin"):
+            with self.subTest(system=system):
+                steps = []
+                self.patch(sleet, "PLATFORM", system)
+                self.patch(sleet, "refresh_cookie", lambda browser: steps.append(browser))
+                self.patch(sleet, "session", lambda: None)
+                self.patch(sleet, "board", lambda s, a: None)
+                self.run_main("--refresh-cookie", "--browser", "clipboard", "-s")
+                self.assertEqual(steps, ["clipboard"])
 
     def test_refresh_cookie_runs_before_the_session_and_then_the_command(self):
         steps = []
-        self.patch(sys, "platform", "darwin")
         self.patch(sleet, "refresh_cookie", lambda browser: steps.append(("refresh", browser)))
         self.patch(sleet, "session", lambda: steps.append("session"))
         self.patch(sleet, "board", lambda s, a: steps.append("board"))
@@ -1003,7 +1013,7 @@ class FakeTools:
         if cmd[0] == "security":
             pw = self.keychain.get(cmd[-1])
             return subprocess.CompletedProcess(cmd, 0 if pw else 44, f"{pw}\n" if pw else "", "not found")
-        if cmd[0] == "pbpaste":
+        if cmd[0] in ("pbpaste", "powershell", "wl-paste", "xclip", "xsel"):
             return subprocess.CompletedProcess(cmd, 0, self.clipboard, "")
         raise AssertionError(f"unexpected command {cmd}")
 
@@ -1335,10 +1345,12 @@ class SaveCookieTest(QuietTestCase):
     def test_creates_a_private_directory_and_file(self):
         shutil.rmtree(sleet.CONFIG_DIR)
         sleet.save_cookie("a=1; b=2")
-        self.assertEqual(os.stat(sleet.CONFIG_DIR).st_mode & 0o777, 0o700)
-        self.assertEqual(os.stat(sleet.COOKIE_FILE).st_mode & 0o777, 0o600)
+        if os.name == "posix":                               # Windows has no owner-only permissions
+            self.assertEqual(os.stat(sleet.CONFIG_DIR).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(sleet.COOKIE_FILE).st_mode & 0o777, 0o600)
         self.assertEqual(sleet.read_cookie(), "a=1; b=2")
 
+    @unittest.skipUnless(os.name == "posix", "Windows has no owner-only file permissions")
     def test_tightens_an_existing_file(self):
         self.write(sleet.COOKIE_FILE, "old=1; and=more", mode=0o644)
         sleet.save_cookie("new=1")
@@ -1421,6 +1433,201 @@ class RefreshCookieTest(QuietTestCase):
         with self.assertRaises(SystemExit) as cm:
             sleet.refresh_cookie("firefox")
         self.assertNotIn("Safari", str(cm.exception.code))
+
+
+class ClipboardTest(QuietTestCase):
+    """--browser clipboard: the same on every system, only the tool that reads the clipboard differs."""
+
+    def read(self, text, system="darwin", tools=("wl-paste", "xclip", "xsel")):
+        self.tools = FakeTools(clipboard=text)
+        self.patch(sleet, "PLATFORM", system)
+        self.patch(sleet.subprocess, "run", self.tools)
+        self.patch(sleet.shutil, "which", lambda name: name if name in tools else None)
+        return list(sleet.clipboard_cookies())
+
+    def test_each_system_has_its_own_clipboard_tool(self):
+        for system, tool in (("darwin", "pbpaste"), ("win32", "powershell"), ("linux", "wl-paste")):
+            with self.subTest(system=system):
+                self.assertEqual(self.read("a=b", system), [("the clipboard", "a=b")])
+                self.assertEqual(self.tools.commands[0][0], tool)
+
+    def test_linux_uses_the_first_tool_that_is_installed(self):
+        self.read("a=b", "linux", tools=("xsel",))
+        self.assertEqual(self.tools.commands, [["xsel", "-ob"]])
+        self.read("a=b", "linux", tools=("xclip", "xsel"))
+        self.assertEqual(self.tools.commands[0][0], "xclip")
+
+    def test_linux_without_a_clipboard_tool_says_what_to_install(self):
+        self.assertDies("needs wl-paste (Wayland), xclip or xsel", self.read, "a=b", "linux", tools=())
+
+    def test_windows_copy_as_curl_cmd(self):
+        text = ('curl ^"https://example.service-now.com/incident_list.do^" ^\n'
+                '  -H ^"accept: text/html^" ^\n'
+                '  -b ^"JSESSIONID=abc123; glide_session_store=X^%^3D1; route=a^|b^" ^\n'
+                '  -H ^"user-agent: Mozilla/5.0 ^(Windows NT 10.0^)^"')
+        self.assertEqual(self.read(text, "win32"),
+                         [("the clipboard", "JSESSIONID=abc123; glide_session_store=X%3D1; route=a|b")])
+
+    def test_windows_copy_as_curl_cmd_with_a_cookie_header(self):
+        text = 'curl ^"https://example.service-now.com/^" ^\n  -H ^"Cookie: JSESSIONID=s; a=b^" ^\n  -H ^"x: y^"'
+        self.assertEqual(self.read(text, "win32"), [("the clipboard", "JSESSIONID=s; a=b")])
+
+    def test_double_quoted_b(self):
+        self.assertEqual(self.read('curl "https://x" -b "JSESSIONID=s; a=b" -H "x: y"'),
+                         [("the clipboard", "JSESSIONID=s; a=b")])
+
+    def test_copy_as_powershell_keeps_only_cookies_for_the_instance(self):
+        text = ('$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession\n'
+                '$session.UserAgent = "Mozilla/5.0"\n'
+                '$session.Cookies.Add((New-Object System.Net.Cookie("JSESSIONID", "abc", "/", "example.service-now.com")))\n'
+                '$session.Cookies.Add((New-Object System.Net.Cookie("_ga", "GA1.2", "/", ".service-now.com")))\n'
+                '$session.Cookies.Add((New-Object System.Net.Cookie("other", "x", "/", "other.example.com")))\n'
+                'Invoke-WebRequest -UseBasicParsing -Uri "https://example.service-now.com/incident_list.do" `\n'
+                '-WebSession $session')
+        self.assertEqual(self.read(text, "win32"), [("the clipboard", "JSESSIONID=abc; _ga=GA1.2")])
+
+    def test_copy_as_powershell_unescapes_backticks(self):
+        text = '$session.Cookies.Add((New-Object System.Net.Cookie("n", "a`$b`"c", "/", "example.service-now.com")))'
+        self.assertEqual(self.read(text, "win32"), [("the clipboard", 'n=a$b"c')])
+
+    def test_copy_as_powershell_without_a_cookie_for_the_instance(self):
+        text = '$session.Cookies.Add((New-Object System.Net.Cookie("n", "v", "/", "other.example.com")))'
+        self.assertDies("no cookie on the clipboard", self.read, text, "win32")
+
+    def test_nothing_useful_explains_the_steps_for_any_browser(self):
+        self.assertDies("press F12 > Network", self.read, "meeting notes", "win32")
+
+    def test_safari_keeps_its_own_explanation(self):
+        self.patch(sleet.subprocess, "run", FakeTools(clipboard="meeting notes"))
+        self.assertDies("Develop > Show Web Inspector", lambda: list(sleet.safari_cookies()))
+
+
+class OtherSystemsTest(QuietTestCase):
+    """What differs outside macOS. PLATFORM is switched; the real Windows behaviour is covered by CI."""
+
+    def home(self, system):
+        """Point the home folder and %APPDATA% at the test directory."""
+        self.patch(sleet, "PLATFORM", system)
+        env = mock.patch.dict(os.environ, {"HOME": self.dir, "USERPROFILE": self.dir,
+                                           "APPDATA": os.path.join(self.dir, "AppData", "Roaming")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def firefox_profile(self, *parts):
+        d = os.path.join(self.dir, *parts)
+        os.makedirs(d)
+        data = json.dumps({"cookies": [{"host": HOST, "name": "JSESSIONID", "value": "s"}]}).encode()
+        with open(os.path.join(d, "sessionstore.jsonlz4"), "wb") as f:
+            f.write(b"mozLz40\0" + len(data).to_bytes(4, "little") + lz4_literals(data))
+
+    def test_firefox_on_windows_lives_under_appdata(self):
+        self.home("win32")
+        self.firefox_profile("AppData", "Roaming", "Mozilla", "Firefox", "Profiles", "abc.default-release")
+        self.assertEqual(list(sleet.firefox_cookies()), [("firefox (abc.default-release)", "JSESSIONID=s")])
+
+    def test_firefox_on_linux_as_package_snap_or_flatpak(self):
+        self.home("linux")
+        self.firefox_profile(".mozilla", "firefox", "a.default")
+        self.firefox_profile("snap", "firefox", "common", ".mozilla", "firefox", "b.snap")
+        self.firefox_profile(".var", "app", "org.mozilla.firefox", ".mozilla", "firefox", "c.flatpak")
+        self.assertEqual([label for label, _ in sleet.firefox_cookies()],
+                         ["firefox (a.default)", "firefox (b.snap)", "firefox (c.flatpak)"])
+
+    def test_the_macos_folder_is_not_read_elsewhere(self):
+        self.home("linux")
+        self.firefox_profile("Application Support", "Firefox", "Profiles", "mac.default")
+        self.assertEqual(list(sleet.firefox_cookies()), [])
+
+    def test_chrome_and_edge_are_refused_with_the_clipboard_route(self):
+        for system in ("win32", "linux"):
+            for browser in ("chrome", "edge"):
+                with self.subTest(system=system, browser=browser):
+                    self.patch(sleet, "PLATFORM", system)
+                    self.assertDies(f"{browser.capitalize()} cookies can only be read on macOS",
+                                    sleet.refresh_cookie, browser)
+                    self.assertDies("--browser clipboard", sleet.refresh_cookie, browser)
+
+    def test_chrome_and_edge_never_touch_the_keychain_tool_elsewhere(self):
+        self.patch(sleet, "PLATFORM", "win32")
+        tools = FakeTools()
+        self.patch(sleet.subprocess, "run", tools)
+        with self.assertRaises(SystemExit):
+            sleet.refresh_cookie("edge")
+        self.assertEqual(tools.commands, [])
+
+    def test_without_a_browser_only_firefox_is_tried_and_the_hint_names_the_clipboard(self):
+        tried = []
+        self.patch(sleet, "PLATFORM", "win32")
+        self.patch(sleet, "BROWSERS", {b: (lambda b=b: tried.append(b) or iter(())) for b in sleet.BROWSERS})
+        self.assertDies("for Edge and Chrome copy a request as cURL and add --browser clipboard",
+                        sleet.refresh_cookie, None)
+        self.assertEqual(tried, ["firefox"])
+
+    def test_config_files_are_read_as_utf_8_whatever_the_code_page(self):
+        path = os.path.join(sleet.CONFIG_DIR, "config.json")
+        with open(path, "wb") as f:
+            f.write('{"done_states": ["Opgelöst", "Geschlossen ✓"]}'.encode("utf-8"))
+        self.assertEqual(sleet.read_config(path), {"done_states": ["Opgelöst", "Geschlossen ✓"]})
+
+    @unittest.skipUnless(sleet.yaml, "needs PyYAML")
+    def test_yaml_files_are_read_as_utf_8_whatever_the_code_page(self):
+        path = os.path.join(sleet.CONFIG_DIR, "config.yaml")
+        with open(path, "wb") as f:
+            f.write('done_states: ["Opgelöst", "Geschlossen ✓"]\n'.encode("utf-8"))
+        self.assertEqual(sleet.read_config(path), {"done_states": ["Opgelöst", "Geschlossen ✓"]})
+
+    def test_no_permission_warning_where_there_are_no_permissions(self):
+        self.patch(sleet, "FILE_MODES", False)
+        self.write(sleet.COOKIE_FILE, "a=1", mode=0o644)
+        sleet.read_cookie()
+        self.assertEqual(self.err, "")
+
+    def test_the_prompt_reads_the_console_device_of_the_system(self):
+        for system, device in (("win32", "CONIN$"), ("linux", "/dev/tty"), ("darwin", "/dev/tty")):
+            with self.subTest(system=system):
+                self.patch(sleet, "PLATFORM", system)
+                opened = mock.mock_open(read_data="Y\n")
+                with mock.patch("builtins.open", opened):
+                    self.assertEqual(sleet.ask("Apply?"), "y")
+                opened.assert_called_once_with(device)
+
+    def test_the_prompt_without_a_terminal_answers_nothing(self):
+        with mock.patch("builtins.open", side_effect=OSError):
+            self.assertEqual(sleet.ask("Apply?"), "")
+
+    def picker(self, system, python, script):
+        self.patch(sleet, "PLATFORM", system)
+        self.patch(sleet.shutil, "which", lambda name: name)
+        self.patch(sleet.sys, "executable", python)
+        self.patch(sleet.os.path, "realpath", lambda path: script)
+        self.patch(sleet, "fetch_tasks", lambda s, a: [])
+        run = mock.Mock(return_value=subprocess.CompletedProcess([], 130, "", ""))
+        self.patch(sleet.subprocess, "run", run)
+        sleet.pick(None, None)
+        argv = run.call_args.args[0]
+        return argv[argv.index("--preview") + 1], run.call_args.kwargs["env"]
+
+    def test_the_picker_quotes_its_command_for_cmd_exe_on_windows(self):
+        preview, env = self.picker("win32", r"C:\Program Files\Python\python.exe", r"C:\Users\A B\sleet.py")
+        self.assertEqual(preview, r'"C:\Program Files\Python\python.exe" "C:\Users\A B\sleet.py" {1} -n 3')
+        self.assertEqual(env["SLEET_COLOR"], "1")
+
+    def test_the_picker_quotes_its_command_for_a_posix_shell_elsewhere(self):
+        preview, env = self.picker("linux", "/opt/my python/bin/python", "/home/a b/sleet.py")
+        self.assertEqual(preview, "'/opt/my python/bin/python' '/home/a b/sleet.py' {1} -n 3")
+        self.assertEqual(env["SLEET_COLOR"], "1")
+
+    def test_output_that_cannot_be_encoded_never_crashes(self):
+        out, err = mock.Mock(), mock.Mock()
+        self.patch(sys, "stdout", out)
+        self.patch(sys, "stderr", err)
+        self.patch(sleet, "main", lambda: None)
+        sleet.run()
+        out.reconfigure.assert_called_once_with(errors="replace")
+        err.reconfigure.assert_called_once_with(errors="replace")
+
+    def test_colours_are_off_when_output_is_not_a_terminal(self):
+        self.assertFalse(sleet.ansi_terminal())                # stdout is a StringIO here
 
 
 if __name__ == "__main__":

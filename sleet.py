@@ -2,7 +2,7 @@
 """sleet - ServiceNow from the terminal, using your own SSO browser session.
 
 Config:   ~/.config/sleet/config.json    (instance, presets, extra detail fields; config.yaml with PyYAML)
-Cookie:   ~/.config/sleet/cookie         (browser Cookie header, chmod 600; sleet --refresh-cookie on macOS)
+Cookie:   ~/.config/sleet/cookie         (browser Cookie header, chmod 600; written by sleet --refresh-cookie)
 Token:    ~/.config/sleet/token          (cached session token, written by sleet)
 Board:    ~/.config/sleet/sections.json  (optional, dashboard-style sections; sections.yaml with PyYAML)
 """
@@ -34,6 +34,8 @@ except ImportError:
 
 __version__ = "0.3.0"
 
+PLATFORM = sys.platform          # one place to ask which system this is (the tests switch it)
+FILE_MODES = os.name == "posix"  # Windows has no owner-only permission bits to check or set
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "sleet")
 
 
@@ -53,11 +55,12 @@ CONFIG_FILE = config_path("config")
 COOKIE_FILE = os.path.join(CONFIG_DIR, "cookie")
 SECTIONS_FILE = config_path("sections")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
-REFRESH = ("sign in to ServiceNow in your browser and run: sleet --refresh-cookie" if sys.platform == "darwin"
-           else f"save your browser Cookie header to {COOKIE_FILE} (chmod 600)")
+REFRESH = ("sign in to ServiceNow in your browser and run: sleet --refresh-cookie" if PLATFORM == "darwin"
+           else "sign in to ServiceNow in your browser, copy a request as cURL and run: "
+                "sleet --refresh-cookie --browser clipboard (steps: \"Session cookie\" in the README)")
 G_CK = re.compile(r"g_ck\s*=\s*['\"]([a-f0-9]+)['\"]")
 
-# --refresh-cookie (macOS): where the browsers keep their cookies
+# --refresh-cookie: where the browsers keep their cookies (Chrome and Edge are read on macOS only)
 APP_SUPPORT = os.path.expanduser("~/Library/Application Support")
 CHROMIUM = {   # browser: (profile root under APP_SUPPORT, Keychain item holding its cookie key)
     "chrome": ("Google/Chrome", "Chrome Safe Storage"),
@@ -66,11 +69,16 @@ CHROMIUM = {   # browser: (profile root under APP_SUPPORT, Keychain item holding
 SAFARI_HELP = ("Safari keeps the session in memory only. In Safari: open ServiceNow, Develop > Show Web Inspector "
                "> Network, reload, right-click a request to your instance > Copy as cURL, then run this again "
                "(no Develop menu? Settings > Advanced > Show features for web developers)")
+CLIPBOARD_HELP = ("In your browser: open ServiceNow, press F12 > Network, reload, right-click a request to your "
+                  "instance > Copy > Copy as cURL, then run this again")
+# Chrome and Edge lock their cookie file on Windows and encrypt it with a key only the browser may use
+NOT_READABLE = ("{browser} cookies can only be read on macOS; on this system use the clipboard: "
+                "sleet --refresh-cookie --browser clipboard")
 
 
 def read_config(path):
     """Parse a config file: YAML for .yaml/.yml (needs PyYAML), JSON otherwise."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:              # not the Windows code page
         if not is_yaml(path):
             try:
                 return json.load(f)
@@ -116,7 +124,22 @@ SECTIONS = [
     ("Change Task", "CHGTask", "change_task"),
 ]
 
-LINKS = sys.stdout.isatty()                              # OSC 8 hyperlinks only on a real terminal
+def ansi_terminal():
+    """True when stdout is a terminal that understands escape sequences; switches them on in a Windows console."""
+    if not sys.stdout.isatty():
+        return False
+    if PLATFORM != "win32":
+        return True
+    try:
+        k32 = ctypes.windll.kernel32
+        handle, mode = k32.GetStdHandle(-11), ctypes.c_uint32()          # STD_OUTPUT_HANDLE
+        return bool(k32.GetConsoleMode(handle, ctypes.byref(mode))
+                    and k32.SetConsoleMode(handle, mode.value | 4))      # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except (AttributeError, OSError):
+        return False
+
+
+LINKS = ansi_terminal()                                  # OSC 8 hyperlinks only on a real terminal
 TTY = LINKS or os.environ.get("SLEET_COLOR") == "1"         # colours also in fzf preview
 
 
@@ -149,11 +172,11 @@ def clean(v):
 def read_cookie():
     try:
         mode = os.stat(COOKIE_FILE).st_mode
-        with open(COOKIE_FILE) as f:
+        with open(COOKIE_FILE, encoding="utf-8") as f:
             raw = f.read().strip()
     except FileNotFoundError:
         die(f"no cookie file at {COOKIE_FILE} - {REFRESH}")
-    if mode & 0o077:
+    if FILE_MODES and mode & 0o077:
         print(f"[sleet] warning: {COOKIE_FILE} is readable by others - run: chmod 600 {COOKIE_FILE}",
               file=sys.stderr)
     if raw.lower().startswith("cookie:"):                # pasted with the header name
@@ -373,9 +396,22 @@ def firefox_profile(prof):
     return jar
 
 
+def firefox_profiles():
+    """Profile folders, each with a trailing separator. The file formats are the same on every system."""
+    if PLATFORM == "darwin":
+        roots = [os.path.join(APP_SUPPORT, "Firefox", "Profiles")]
+    elif PLATFORM == "win32":
+        roots = [os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Roaming"),
+                              "Mozilla", "Firefox", "Profiles")]
+    else:                                                   # package, snap and flatpak installs
+        roots = [os.path.expanduser(d) for d in ("~/.mozilla/firefox", "~/snap/firefox/common/.mozilla/firefox",
+                                                 "~/.var/app/org.mozilla.firefox/.mozilla/firefox")]
+    return [p for root in roots for p in sorted(glob.glob(os.path.join(root, "*", "")))]
+
+
 def firefox_cookies():
-    for prof in sorted(glob.glob(os.path.join(APP_SUPPORT, "Firefox", "Profiles", "*", ""))):
-        label = f"firefox ({os.path.basename(prof.rstrip('/'))})"
+    for prof in firefox_profiles():
+        label = f"firefox ({os.path.basename(os.path.dirname(prof))})"
         try:
             jar = firefox_profile(prof)
         except READ_ERRORS as e:
@@ -389,21 +425,64 @@ def firefox_cookies():
 COOKIE_PAIRS = re.compile(r"[!#$%&'*+\-.^_`|~\w]+=[^;\s]*(?:;\s*[!#$%&'*+\-.^_`|~\w]+=[^;\s]*)*;?")
 
 
-def safari_cookies():
-    """Safari never writes session cookies to disk, so read a 'Copy as cURL' from the clipboard."""
-    text = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout.strip()
-    m = re.search(r"(?:-b|--cookie)\s+\$?'([^']+)'|cookie:\s*([^'\"\r\n]+)", text, re.I)
-    raw = (m.group(1) or m.group(2)).strip() if m else text if COOKIE_PAIRS.fullmatch(text) else ""
+def clipboard_text():
+    """The text on the clipboard, with whatever tool this system has for that."""
+    if PLATFORM == "darwin":
+        cmd = ["pbpaste"]
+    elif PLATFORM == "win32":
+        cmd = ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"]
+    else:
+        tools = (["wl-paste", "--no-newline"], ["xclip", "-o", "-selection", "clipboard"], ["xsel", "-ob"])
+        cmd = next((t for t in tools if shutil.which(t[0])), None)
+        if not cmd:
+            die("reading the clipboard needs wl-paste (Wayland), xclip or xsel")
+    return subprocess.run(cmd, capture_output=True, text=True, errors="replace").stdout.strip()
+
+
+PS_COOKIE = re.compile(r'System\.Net\.Cookie\(' + r',\s*'.join([r'"((?:[^"`]|`.)*)"'] * 4) + r'\)')
+
+
+def cookie_from_text(text):
+    """The Cookie header in a copied request: "Copy as cURL" in its bash and Windows cmd forms,
+    "Copy as PowerShell", a Cookie header line, or the bare header value. '' when there is none."""
+    ps = [[re.sub(r"`(.)", r"\1", part) for part in m] for m in PS_COOKIE.findall(text)]
+    if ps:                                                  # (name, value, path, domain) per cookie
+        return cookie_header([(domain, name, value) for name, value, _, domain in ps if for_instance(domain)])
+    if '^"' in text:                                        # cmd.exe form: ^ escapes the next character
+        text = re.sub(r"\^(.)", r"\1", text, flags=re.S)
+    m = re.search(r"(?:-b|--cookie)\s+\$?(?:'([^']+)'|\"([^\"]+)\")|cookie:\s*([^'\"\r\n]+)", text, re.I)
+    if m:
+        return next(g for g in m.groups() if g).strip()
+    return text if COOKIE_PAIRS.fullmatch(text) else ""
+
+
+def clipboard_cookies(help_text=CLIPBOARD_HELP):
+    """Any browser on any system: read a request the user copied in the developer tools."""
+    raw = cookie_from_text(clipboard_text())
     if not raw:
-        die(f"no cookie on the clipboard. {SAFARI_HELP}")
+        die(f"no cookie on the clipboard. {help_text}")
     yield "the clipboard", raw
 
 
+def safari_cookies():
+    """Safari never writes session cookies to disk, so read a 'Copy as cURL' from the clipboard."""
+    return clipboard_cookies(SAFARI_HELP)
+
+
+def mac_only(browser):
+    def read():
+        if PLATFORM != "darwin":
+            die(NOT_READABLE.format(browser=browser.capitalize()))
+        return chromium_cookies(browser)
+    return read
+
+
 BROWSERS = {
-    "chrome": lambda: chromium_cookies("chrome"),
-    "edge": lambda: chromium_cookies("edge"),
+    "chrome": mac_only("chrome"),
+    "edge": mac_only("edge"),
     "firefox": firefox_cookies,
     "safari": safari_cookies,
+    "clipboard": clipboard_cookies,
 }
 
 
@@ -416,15 +495,17 @@ def signed_in(raw):
 def save_cookie(raw):
     os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
     fd = os.open(COOKIE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.fchmod(fd, 0o600)                                    # also when the file already existed
-    with os.fdopen(fd, "w") as f:
+    if hasattr(os, "fchmod"):                               # not on Windows
+        os.fchmod(fd, 0o600)                                # also when the file already existed
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(raw + "\n")
 
 
 def refresh_cookie(browser):
     """Save the first signed-in session found in the browser(s) to COOKIE_FILE; only a working one."""
     rejected = False
-    for b in [browser] if browser else ["chrome", "edge", "firefox"]:
+    mac = PLATFORM == "darwin"
+    for b in [browser] if browser else ["chrome", "edge", "firefox"] if mac else ["firefox"]:
         for label, raw in BROWSERS[b]():
             if signed_in(raw):
                 save_cookie(raw)
@@ -434,9 +515,11 @@ def refresh_cookie(browser):
     # cookies were there but refused: the session timed out behind an open tab, or the browser has not
     # written the new one yet (it saves cookies every 30 seconds or so)
     die(("the session in your browser has expired or is not saved yet - reload a ServiceNow page there, "
-         "wait 30 seconds and retry" if rejected and browser != "safari" else
+         "wait 30 seconds and retry" if rejected and browser not in ("safari", "clipboard") else
          f"no signed-in session found - sign in to {BASE} in your browser and retry")
-        + ("" if browser else " (Safari: add --browser safari)"))
+        + ("" if browser else " (Safari: add --browser safari)" if mac else
+           " (only Firefox is read automatically here; for Edge and Chrome copy a request as cURL and add "
+           "--browser clipboard)"))
 
 
 def api_error(r):
@@ -616,20 +699,22 @@ def pick(s, a):
     """Interactive picker: fzf list with live ticket preview."""
     global TTY, LINKS
     if not shutil.which("fzf"):
-        die("needs fzf: brew install fzf")
+        die("needs fzf: https://github.com/junegunn/fzf (brew, apt, winget and scoop all have it)")
     tty, links = TTY, LINKS
     TTY = LINKS = False
     rows = fetch_tasks(s, a)
     lines = "\n".join(task_line(t).strip() for t in rows)
     TTY, LINKS = tty, links
-    me = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.realpath(__file__))}"
+    me = [sys.executable, os.path.realpath(__file__)]       # fzf runs its commands through cmd.exe on Windows
+    me = subprocess.list2cmdline(me) if PLATFORM == "win32" else " ".join(map(shlex.quote, me))
     r = subprocess.run([
         "fzf", "--ansi", "--no-sort", "--layout=reverse",
         "--header", "enter: open here · ctrl-o: browser · esc: quit",
-        "--preview", f"SLEET_COLOR=1 {me} {{1}} -n 3",
+        "--preview", f"{me} {{1}} -n 3",
         "--preview-window", "right,60%,wrap",
         "--bind", f"ctrl-o:execute-silent({me} {{1}} -w)",
-    ], input=lines, text=True, stdout=subprocess.PIPE)
+    ], input=lines, text=True, encoding="utf-8", stdout=subprocess.PIPE,
+        env={**os.environ, "SLEET_COLOR": "1", "PYTHONIOENCODING": "utf-8"})    # colours in the preview
     if r.returncode != 0 or not r.stdout.strip():
         return
     a.number = r.stdout.split()[0]
@@ -682,7 +767,8 @@ def read_text(v):
 
 def ask(msg):
     try:
-        with open("/dev/tty") as tty:          # works even when stdin is piped
+        # the terminal itself, so it works even when stdin is piped
+        with open("CONIN$" if PLATFORM == "win32" else "/dev/tty") as tty:
             print(msg, end=" ", flush=True)
             return tty.readline().strip().lower()
     except OSError:
@@ -1106,12 +1192,12 @@ def main():
     p.add_argument("-w", "--web", action="store_true", help="with a number: open it in the browser")
     p.add_argument("-n", "--notes", type=int, default=5, metavar="N",
                    help="with a number: activity entries to show (0 = all, default 5)")
-    k = p.add_argument_group("session cookie (macOS)")
+    k = p.add_argument_group("session cookie")
     k.add_argument("--refresh-cookie", action="store_true",
                    help="first copy your ServiceNow session from the browser into the cookie file")
     k.add_argument("--browser", choices=list(BROWSERS),
-                   help="with --refresh-cookie: browser to read (default: chrome, edge, firefox in turn); "
-                        "safari reads a 'Copy as cURL' from the clipboard")
+                   help="with --refresh-cookie: where to read (default on macOS: chrome, edge, firefox in turn; "
+                        "elsewhere: firefox); clipboard reads a request you copied as cURL, from any browser")
     d = p.add_argument_group("discover (read-only)")
     d.add_argument("--fields", nargs="+", metavar=("TABLE", "FIELD"),
                    help="fields of a table with the required ones first; add a field name to list its choices")
@@ -1161,8 +1247,6 @@ def main():
         p.error("only one of --note/--comment/--desc/--preset can read stdin")
     if a.browser and not a.refresh_cookie:
         p.error("--browser needs --refresh-cookie")
-    if a.refresh_cookie and sys.platform != "darwin":
-        p.error(f"--refresh-cookie reads macOS browsers; {REFRESH}")
 
     if a.refresh_cookie:
         refresh_cookie(a.browser)
@@ -1189,6 +1273,9 @@ def main():
 
 def run():
     """Console-script entry point."""
+    for stream in (sys.stdout, sys.stderr):                 # a redirected stream may not be UTF-8: never crash on it
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     try:
         main()
     except requests.exceptions.ConnectionError as e:

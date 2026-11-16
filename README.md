@@ -9,7 +9,7 @@ Sleet reads and updates ServiceNow tickets from your terminal. It uses the same 
 
 ## Requirements
 
-- macOS or Linux with Python 3.9 or later.
+- macOS, Linux or Windows with Python 3.9 or later. Windows support is experimental, see [Windows notes](#windows-notes).
 - Optional: [fzf](https://github.com/junegunn/fzf) for the interactive picker, and `jq` for scripting with `-j`.
 - Optional: [PyYAML](https://pypi.org/project/PyYAML/), for a [YAML configuration](#yaml-instead-of-json).
 
@@ -33,15 +33,23 @@ Sleet reads and updates ServiceNow tickets from your terminal. It uses the same 
       -o ~/.config/sleet/config.json
     ```
 
+    On Windows, in PowerShell:
+
+    ```powershell
+    New-Item -ItemType Directory -Force "$HOME\.config\sleet" | Out-Null
+    Invoke-WebRequest https://raw.githubusercontent.com/nekocentral/sleet/main/config.example.json `
+      -OutFile "$HOME\.config\sleet\config.json"
+    ```
+
     To use YAML instead, see [YAML instead of JSON](#yaml-instead-of-json).
 
-3. Sign in to ServiceNow in your browser, and save your session cookie. On macOS with Chrome, Edge or Firefox:
+3. Sign in to ServiceNow in your browser, and save your session cookie. On macOS with Chrome, Edge or Firefox, and on Windows or Linux with Firefox:
 
     ```bash
     sleet --refresh-cookie
     ```
 
-    For Safari and Linux, see [Session cookie](#session-cookie).
+    For Edge and Chrome on Windows or Linux, and for Safari, see [Session cookie](#session-cookie).
 
 4. Run `sleet -f`. You see a list of your active tickets.
 
@@ -49,7 +57,7 @@ When `sleet` reports that the session expired, repeat step 3.
 
 ### Install without pipx or uv
 
-Clone the repository and run the installer. It creates a private virtual environment with `requests` and PyYAML, writes a `sleet` launcher to `~/bin` (or the directory you pass), and copies the example configuration if you don't have one yet:
+On macOS and Linux, clone the repository and run the installer. It creates a private virtual environment with `requests` and PyYAML, writes a `sleet` launcher to `~/bin` (or the directory you pass), and copies the example configuration if you don't have one yet:
 
 ```bash
 git clone https://github.com/nekocentral/sleet ~/src/sleet
@@ -60,38 +68,61 @@ git clone https://github.com/nekocentral/sleet ~/src/sleet
 
 Sleet uses the session of your browser, so when that session expires, you sign in to ServiceNow in your browser again and save the new cookie. `sleet` tells you when this is needed.
 
-### macOS: Chrome, Edge or Firefox
+| Browser | macOS | Windows and Linux |
+| --- | --- | --- |
+| Firefox | `sleet --refresh-cookie` | `sleet --refresh-cookie` |
+| Chrome, Edge | `sleet --refresh-cookie` | From the clipboard |
+| Safari | From the clipboard | Not applicable |
+
+Whichever way the cookie is read, Sleet checks that the session works before it saves anything.
+
+### Read it from the browser
 
 ```bash
-sleet --refresh-cookie                     # tries Chrome, Edge and Firefox in turn
+sleet --refresh-cookie                     # macOS: Chrome, Edge and Firefox in turn. Elsewhere: Firefox
 sleet --refresh-cookie --browser firefox   # one browser only
 sleet --refresh-cookie -s                  # refresh, then continue with any other command
 ```
 
-Sleet reads the cookies of your instance from the browser's cookie store, checks that the session works, and only then saves it. No browser settings are needed: Chrome, Edge and Firefox keep the session on disk while they run.
+Sleet reads the cookies of your instance from the browser's cookie store. No browser settings are needed: the browsers keep the session on disk while they run.
 
 If Sleet says the session in your browser has expired or isn't saved yet, reload a ServiceNow page in the browser, wait 30 seconds and run the command again. A tab can look signed in after its session has timed out, and browsers write new cookies to disk with a delay.
 
-Chrome and Edge encrypt their cookies with a key in your Keychain. The first time, macOS asks whether `security` may use "Chrome Safe Storage" (or "Microsoft Edge Safe Storage"). **Always Allow** stops the question, but then any program that runs as you can read that key. **Allow** asks again at the next refresh.
+On macOS, Chrome and Edge encrypt their cookies with a key in your Keychain. The first time, macOS asks whether `security` may use "Chrome Safe Storage" (or "Microsoft Edge Safe Storage"). **Always Allow** stops the question, but then any program that runs as you can read that key. **Allow** asks again at the next refresh.
 
-### macOS: Safari
+On Windows, Chrome and Edge keep their cookie file locked and encrypt it with a key that only the browser itself may use. Sleet doesn't work around that protection. Use the clipboard instead.
 
-Safari keeps the session in memory only, so Sleet reads it from the clipboard:
+### Read it from the clipboard
 
-1. Turn on the Develop menu: **Settings** > **Advanced** > **Show features for web developers**.
-2. On a ServiceNow page, select **Develop** > **Show Web Inspector** > **Network**, and reload the page.
-3. Right-click a request to your instance and select **Copy as cURL**.
-4. Run `sleet --refresh-cookie --browser safari`.
+This works with every browser on every system:
 
-### Linux, or by hand
+1. On a ServiceNow page, open the developer tools (F12, or **Develop** > **Show Web Inspector** in Safari), go to **Network**, and reload the page.
+2. Right-click a request to your instance and select **Copy** > **Copy as cURL**. On Windows, **Copy as cURL (bash)**, **Copy as cURL (cmd)** and **Copy as PowerShell** all work.
+3. Run:
+
+    ```bash
+    sleet --refresh-cookie --browser clipboard
+    ```
+
+Sleet takes only the cookie out of what you copied. Text that isn't a copied request or a cookie is refused, and nothing is sent to your instance.
+
+In Safari, turn on the Develop menu first: **Settings** > **Advanced** > **Show features for web developers**. On Linux, the clipboard is read with `wl-paste`, `xclip` or `xsel`, whichever is installed.
+
+### By hand
 
 1. Open the developer tools, go to **Network**, and reload the page.
 2. Select any request to your instance and copy the full value of the `Cookie` request header.
-3. Save it:
+3. Save that one line as `~/.config/sleet/cookie`. On macOS and Linux, make it private with `chmod 600 ~/.config/sleet/cookie`.
 
-    ```bash
-    pbpaste > ~/.config/sleet/cookie && chmod 600 ~/.config/sleet/cookie   # Linux: xclip -o
-    ```
+## Windows notes
+
+> **Experimental:** Sleet passes its automated tests on Windows, but it hasn't been used day to day on a real Windows machine yet. Expect rough edges, mainly around the console and the clipboard. If something doesn't work, [open an issue](https://github.com/nekocentral/sleet/issues) with the command you ran and the message you got. Leave out cookie values and anything else from your instance that isn't public.
+
+- **Install:** use pipx or uv. `install.sh` is for macOS and Linux.
+- **Configuration folder:** `%USERPROFILE%\.config\sleet`, the same place as on the other systems.
+- **File permissions:** Windows has no `chmod 600`. The cookie file is protected by your user profile folder, so don't move it to a shared location.
+- **Terminal:** use Windows Terminal or PowerShell 7 for colours and clickable ticket numbers.
+- **Picker:** `sleet -i` needs fzf, for example `winget install fzf`.
 
 ## Read tickets
 

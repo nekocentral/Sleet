@@ -20,6 +20,7 @@ jobs:
           - {os: ubuntu-24.04, python: "3.9"}
           - {os: ubuntu-latest, python: "3.13"}
           - {os: macos-latest, python: "3.13"}    # runs the Keychain cookie decryption tests
+          - {os: windows-latest, python: "3.13"}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
