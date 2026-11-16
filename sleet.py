@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """sleet - ServiceNow from the terminal, using your own SSO browser session.
 
-Config:   ~/.config/sleet/config.json    (instance, presets, extra detail fields)
+Config:   ~/.config/sleet/config.json    (instance, presets, extra detail fields; config.yaml with PyYAML)
 Cookie:   ~/.config/sleet/cookie         (browser Cookie header, chmod 600; sleet --refresh-cookie on macOS)
 Token:    ~/.config/sleet/token          (cached session token, written by sleet)
-Board:    ~/.config/sleet/sections.json  (optional, dashboard-style sections)
+Board:    ~/.config/sleet/sections.json  (optional, dashboard-style sections; sections.yaml with PyYAML)
 """
 import argparse
 import contextlib
@@ -20,18 +20,38 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import webbrowser
 from urllib.parse import quote
 
 import requests
 
+try:
+    import yaml          # optional: only a config.yaml or sections.yaml needs it
+except ImportError:
+    yaml = None
+
 __version__ = "0.3.0"
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "sleet")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+
+def config_path(name):
+    """name.yaml or name.yml in CONFIG_DIR when one exists, else name.json."""
+    for ext in (".yaml", ".yml"):
+        if os.path.exists(os.path.join(CONFIG_DIR, name + ext)):
+            return os.path.join(CONFIG_DIR, name + ext)
+    return os.path.join(CONFIG_DIR, name + ".json")
+
+
+def is_yaml(path):
+    return path.endswith((".yaml", ".yml"))
+
+
+CONFIG_FILE = config_path("config")
 COOKIE_FILE = os.path.join(CONFIG_DIR, "cookie")
-SECTIONS_FILE = os.path.join(CONFIG_DIR, "sections.json")
+SECTIONS_FILE = config_path("sections")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
 REFRESH = ("sign in to ServiceNow in your browser and run: sleet --refresh-cookie" if sys.platform == "darwin"
            else f"save your browser Cookie header to {COOKIE_FILE} (chmod 600)")
@@ -48,14 +68,27 @@ SAFARI_HELP = ("Safari keeps the session in memory only. In Safari: open Service
                "(no Develop menu? Settings > Advanced > Show features for web developers)")
 
 
+def read_config(path):
+    """Parse a config file: YAML for .yaml/.yml (needs PyYAML), JSON otherwise."""
+    with open(path) as f:
+        if not is_yaml(path):
+            try:
+                return json.load(f)
+            except json.JSONDecodeError as e:
+                sys.exit(f"[sleet] {path}: {e}")
+        if yaml is None:
+            sys.exit(f"[sleet] {path} needs PyYAML: pip install pyyaml (or use a .json file)")
+        try:
+            return yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            sys.exit(f"[sleet] {path}: {e}")
+
+
 def load_config():
     try:
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
+        return read_config(CONFIG_FILE)
     except FileNotFoundError:
         return {}
-    except json.JSONDecodeError as e:
-        sys.exit(f"[sleet] {CONFIG_FILE}: {e}")
 
 
 CFG = load_config()
@@ -564,11 +597,7 @@ LINE_FIELDS = "sys_id,number,short_description,state,priority,sys_updated_on"
 
 def config_board(s, a):
     """Board driven by encoded queries copied from the dashboard tiles."""
-    try:
-        with open(SECTIONS_FILE) as f:
-            cfg = json.load(f)
-    except json.JSONDecodeError as e:
-        die(f"{SECTIONS_FILE}: {e}")
+    cfg = read_config(SECTIONS_FILE)
     results = [(sec, get(s, sec["table"], sec["query"], LINE_FIELDS)) for sec in cfg]
 
     if a.json:
@@ -954,7 +983,7 @@ def show_fields(s, a):
 
 
 def make_template(s, a):
-    """Print a template for --new, ready to paste under "templates" in config.json."""
+    """Print a template for --new, ready to paste under "templates" in the config file."""
     table = lookup_table(a.template)
     fields, notes = describe(s, table)
     skip = {"short_description", "description"}          # come from -t and --desc
@@ -966,9 +995,14 @@ def make_template(s, a):
         elif fields[n]["reference"]:
             body["_" + n] = f"display value of a {fields[n]['reference']} record"
         body[n] = ""
-    print(json.dumps({table: {"table": table, "required": req, "fields": body}}, indent=2))
+    tmpl = {table: {"table": table, "required": req, "fields": body}}
+    if yaml and is_yaml(CONFIG_FILE):                    # indented to sit under "templates:"
+        print(textwrap.indent(yaml.safe_dump(tmpl, sort_keys=False, allow_unicode=True), "  "), end="")
+    else:
+        print(json.dumps(tmpl, indent=2))
     later = {n: [r for r in f["required"] if r.startswith("on the form when")] for n, f in fields.items()}
-    hints = ["paste this under \"templates\" in config.json, rename the key if you like, and fill in the empty values",
+    hints = [f"paste this under \"templates\" in {os.path.basename(CONFIG_FILE)}, rename the key if you like, "
+             "and fill in the empty values",
              "empty values are not sent; \"required\" makes sleet stop when one is still empty"]
     hints += [f"{n} is required {', '.join(w)}; add it to a preset for that step" for n, w in sorted(later.items()) if w and n not in req]
     for n in hints + notes:
