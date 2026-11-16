@@ -861,6 +861,10 @@ class AssignTest(WriteTestCase):
     def test_caret_is_refused(self):
         self.assertDies("'^' is not allowed", self.run_main, "INC1", "--assign", "a^ORb", "-y")
 
+    def test_a_name_that_servicenow_would_run_as_a_script_is_refused(self):
+        self.assertDies("--assign: text starting with 'javascript:'", self.run_main,
+                        "INC1", "--assign", "javascript:gs.getUserID()", "-y")
+
 
 class CreateTest(ServerTestCase):
 
@@ -973,6 +977,24 @@ class SearchTest(ServerTestCase):
         self.run_main("--table", "incident", "--query", "category=network")
         self.assertEqual(self.server.api_calls()[0]["path"], "/api/now/table/incident")
         self.assertIn("INC1", self.out)
+
+    def test_a_table_without_state_or_priority_is_listed_with_those_columns_empty(self):
+        article = row(number="KB0010001", sys_id="k1", short_description="How to reset a password")
+        self.server.routes[("GET", "/api/now/table/kb_knowledge")] = FakeResponse(result=[article])
+        self.run_main("--table", "kb_knowledge", "--query", "active=true")
+        self.assertIn("KB0010001", self.out)
+        self.assertIn("How to reset a password", self.out)
+        self.assertIn("1 match", self.out)
+
+    def test_search_text_that_servicenow_would_run_as_a_script_is_refused(self):
+        for text in ("javascript:gs.getUserID()", "  JavaScript:1", "javascript:"):
+            with self.subTest(text=text):
+                self.assertDies("would be run by ServiceNow as a script", self.run_main, "--search", text)
+        self.assertEqual(self.server.api_calls(), [])
+
+    def test_javascript_later_in_the_text_is_ordinary_text(self):
+        self.run_main("--search", "error in javascript: undefined")
+        self.assertIn("short_descriptionLIKEerror in javascript: undefined", self.query())
 
     def test_a_table_without_ticket_numbers_is_refused(self):
         self.server.routes[("GET", "/api/now/table/sys_user")] = FakeResponse(result=[row(name="x")])

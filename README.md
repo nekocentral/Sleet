@@ -159,9 +159,9 @@ sleet --table incident --query "category=network^priority=1"
 sleet --search "certificate" --limit 200 -j
 ```
 
-- **`--search`:** matches the number and the short description, newest first. A `^` in the text is escaped, so it can't add query terms.
-- **`--query`:** sends an encoded query as written, for example one copied from a ServiceNow list filter. It is sorted newest first unless it has its own `ORDERBY`. `-g` and `-u` don't apply: put the group in the query.
-- **`--table`:** the table to search. The default, `task`, holds every kind of ticket. Use a table such as `incident` to filter on its own fields.
+- **`--search`:** matches the number and the short description, newest first. A `^` in the text is escaped, so it can't add query terms. Text that starts with `javascript:` is refused, because ServiceNow would run it as a script.
+- **`--query`:** sends an encoded query as written, for example one copied from a ServiceNow list filter. It is sorted newest first unless it has its own `ORDERBY`. `-g` and `-u` don't apply: put the group in the query. Check field names: ServiceNow ignores a term with a field it doesn't know, so a misspelled field matches every ticket.
+- **`--table`:** the table to search. The default, `task`, holds every kind of ticket. Use a table such as `incident` to filter on its own fields. A table that has numbers but lacks a state or priority, such as `kb_knowledge`, is listed with those columns empty.
 - **`--limit`:** how many rows to show. The default is 50, and `sleet` says when it cut the list.
 - **Assignee:** every result shows who has the ticket, or `-` when nobody does.
 

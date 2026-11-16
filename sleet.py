@@ -32,7 +32,7 @@ try:
 except ImportError:
     yaml = None
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 
 PLATFORM = sys.platform          # one place to ask which system this is (the tests switch it)
 FILE_MODES = os.name == "posix"  # Windows has no owner-only permission bits to check or set
@@ -624,9 +624,11 @@ def owner_cell(t):
 
 
 def task_line(t, table=None, who=False):
-    """One ticket; who adds the assignee after the state and makes room by shortening the title."""
-    return (f"  {num_cell(t, 14, table)}{t['priority'][:12]:<12} {t['state'][:14]:<14} {owner_cell(t) if who else ''}"
-            f"{t['sys_updated_on'][:16]:<16}  {t['short_description'][:54 if who else 70]}")
+    """One ticket; who adds the assignee after the state and makes room by shortening the title.
+    A table searched with --table may lack some of these fields: they are shown empty."""
+    f = {k: t.get(k) or "" for k in ("priority", "state", "sys_updated_on", "short_description")}
+    return (f"  {num_cell(t, 14, table)}{f['priority'][:12]:<12} {f['state'][:14]:<14} {owner_cell(t) if who else ''}"
+            f"{f['sys_updated_on'][:16]:<16}  {f['short_description'][:54 if who else 70]}")
 
 
 def chg_line(ch, who=False):
@@ -739,12 +741,21 @@ def flat(s, a):
 SEARCH_LIMIT = 50   # rows --search and --query show unless --limit says otherwise
 
 
+def as_text_only(text, option):
+    """ServiceNow runs a query value that starts with javascript: as a script on the instance.
+    Text someone typed, or that another tool passed along, must only ever be matched as text."""
+    if text.strip().lower().startswith("javascript:"):
+        die(f"{option}: text starting with 'javascript:' would be run by ServiceNow as a script, not searched for")
+    return text
+
+
 def search(s, a):
     """Find tickets by text (--search) or by an encoded query as written (--query), resolved ones included."""
     table = a.table or "task"
     limit = a.limit or SEARCH_LIMIT
     if a.search is not None:
-        text = a.search.strip().replace("^", "^^")           # a literal ^ must not start a new query term
+        text = as_text_only(a.search, "--search").strip()
+        text = text.replace("^", "^^")                       # a literal ^ must not start a new query term
         terms = [f"short_descriptionLIKE{text}", f"numberLIKE{text}"]
         if a.in_ == "desc":
             terms.append(f"descriptionLIKE{text}")
@@ -859,6 +870,7 @@ def resolve_user(s, who):
     else:
         if "^" in who:
             die("--assign: '^' is not allowed in a name")
+        as_text_only(who, "--assign")
         rows = get(s, "sys_user", f"active=true^name={who}^ORuser_name={who}^ORemail={who}",
                    "sys_id,name,user_name,email")
         if not rows:
