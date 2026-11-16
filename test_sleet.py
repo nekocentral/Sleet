@@ -1259,7 +1259,7 @@ class RefreshCookieTest(QuietTestCase):
         sleet.refresh_cookie(None)
         self.assertEqual(self.saved(), "good=1")
         self.assertEqual(self.read, ["chrome"])
-        self.assertIn("chrome (Default): not signed in", self.err)
+        self.assertIn("chrome (Default): its session is not accepted", self.err)
         self.assertIn("cookie refreshed from chrome (Work)", self.err)
 
     def test_one_browser_only(self):
@@ -1291,6 +1291,17 @@ class RefreshCookieTest(QuietTestCase):
         self.assertEqual(self.saved(), "good=2")
         self.assertIn("chrome (Default): cannot read its cookies", self.err)
         self.assertIn("cookie refreshed from edge (Default)", self.err)
+
+    def test_cookies_that_are_refused_say_to_reload_the_page_and_wait(self):
+        self.patch(sleet, "signed_in", lambda raw: False)
+        self.assertDies("reload a ServiceNow page there, wait 30 seconds and retry", sleet.refresh_cookie, "chrome")
+
+    def test_no_cookies_at_all_says_to_sign_in(self):
+        self.assertDies("no signed-in session found - sign in to", sleet.refresh_cookie, "firefox")
+
+    def test_a_refused_clipboard_cookie_is_not_blamed_on_the_browser_cache(self):
+        self.patch(sleet, "signed_in", lambda raw: False)
+        self.assertDies("no signed-in session found", sleet.refresh_cookie, "safari")
 
     def test_failing_named_browser_has_no_safari_hint(self):
         self.patch(sleet, "signed_in", lambda raw: False)

@@ -390,13 +390,19 @@ def save_cookie(raw):
 
 def refresh_cookie(browser):
     """Save the first signed-in session found in the browser(s) to COOKIE_FILE; only a working one."""
+    rejected = False
     for b in [browser] if browser else ["chrome", "edge", "firefox"]:
         for label, raw in BROWSERS[b]():
             if signed_in(raw):
                 save_cookie(raw)
                 return note(f"cookie refreshed from {label}")
-            note(f"{label}: not signed in to {BASE}")
-    die(f"no signed-in session found - sign in to {BASE} in your browser and retry"
+            rejected = True
+            note(f"{label}: its session is not accepted by {BASE}")
+    # cookies were there but refused: the session timed out behind an open tab, or the browser has not
+    # written the new one yet (it saves cookies every 30 seconds or so)
+    die(("the session in your browser has expired or is not saved yet - reload a ServiceNow page there, "
+         "wait 30 seconds and retry" if rejected and browser != "safari" else
+         f"no signed-in session found - sign in to {BASE} in your browser and retry")
         + ("" if browser else " (Safari: add --browser safari)"))
 
 

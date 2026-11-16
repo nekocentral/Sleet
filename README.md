@@ -67,6 +67,8 @@ sleet --refresh-cookie -s                  # refresh, then continue with any oth
 
 Sleet reads the cookies of your instance from the browser's cookie store, checks that the session works, and only then saves it. No browser settings are needed: Chrome, Edge and Firefox keep the session on disk while they run.
 
+If Sleet says the session in your browser has expired or isn't saved yet, reload a ServiceNow page in the browser, wait 30 seconds and run the command again. A tab can look signed in after its session has timed out, and browsers write new cookies to disk with a delay.
+
 Chrome and Edge encrypt their cookies with a key in your Keychain. The first time, macOS asks whether `security` may use "Chrome Safe Storage" (or "Microsoft Edge Safe Storage"). **Always Allow** stops the question, but then any program that runs as you can read that key. **Allow** asks again at the next refresh.
 
 ### macOS: Safari
