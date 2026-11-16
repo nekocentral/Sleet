@@ -268,6 +268,111 @@ class RecordUrlTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# configuration files: JSON, or YAML with PyYAML
+# --------------------------------------------------------------------------- #
+
+def without_notes(data):
+    """data with every "_key" removed, at any depth."""
+    if isinstance(data, dict):
+        return {k: without_notes(v) for k, v in data.items() if not k.startswith("_")}
+    if isinstance(data, list):
+        return [without_notes(v) for v in data]
+    return data
+
+
+class ConfigFileTest(QuietTestCase):
+
+    def path(self, name):
+        return os.path.join(sleet.CONFIG_DIR, name)
+
+    def test_json_without_a_yaml_file(self):
+        self.assertEqual(sleet.config_path("config"), self.path("config.json"))
+        self.write(self.path("config.json"), "{}")
+        self.assertEqual(sleet.config_path("config"), self.path("config.json"))
+
+    def test_yaml_before_yml_before_json(self):
+        self.write(self.path("config.json"), "{}")
+        self.write(self.path("config.yml"), "")
+        self.assertEqual(sleet.config_path("config"), self.path("config.yml"))
+        self.write(self.path("config.yaml"), "")
+        self.assertEqual(sleet.config_path("config"), self.path("config.yaml"))
+
+    def test_reads_json(self):
+        self.write(self.path("config.json"), '{"instance": "x"}')
+        self.assertEqual(sleet.read_config(self.path("config.json")), {"instance": "x"})
+
+    def test_bad_json_names_the_file(self):
+        self.write(self.path("config.json"), "{not json")
+        self.assertDies(self.path("config.json"), sleet.read_config, self.path("config.json"))
+
+    @unittest.skipUnless(sleet.yaml, "needs PyYAML")
+    def test_reads_yaml(self):
+        self.write(self.path("config.yaml"), "instance: x  # a comment\npresets: {}\n")
+        self.assertEqual(sleet.read_config(self.path("config.yaml")), {"instance": "x", "presets": {}})
+
+    @unittest.skipUnless(sleet.yaml, "needs PyYAML")
+    def test_empty_yaml_is_empty(self):
+        self.write(self.path("config.yaml"), "# nothing yet\n")
+        self.assertEqual(sleet.read_config(self.path("config.yaml")), {})
+
+    @unittest.skipUnless(sleet.yaml, "needs PyYAML")
+    def test_bad_yaml_names_the_file(self):
+        self.write(self.path("config.yaml"), "presets: [unclosed\n")
+        self.assertDies(self.path("config.yaml"), sleet.read_config, self.path("config.yaml"))
+
+    def test_yaml_without_pyyaml_says_so(self):
+        self.patch(sleet, "yaml", None)
+        self.write(self.path("config.yaml"), "instance: x\n")
+        self.assertDies("needs PyYAML", sleet.read_config, self.path("config.yaml"))
+
+    def test_missing_config_is_empty(self):
+        self.assertEqual(sleet.load_config(), {})
+
+    @unittest.skipUnless(sleet.yaml, "needs PyYAML")
+    def test_examples_agree(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name in ("config", "sections"):
+            with self.subTest(name):
+                with open(os.path.join(here, f"{name}.example.json")) as f:
+                    expected = without_notes(json.load(f))
+                actual = without_notes(sleet.read_config(os.path.join(here, f"{name}.example.yaml")))
+                self.assertEqual(actual, expected)
+
+
+class MakeTemplateTest(QuietTestCase):
+
+    FIELDS = {
+        "impact": {"label": "Impact", "type": "integer", "reference": "",
+                   "choices": [["1 - High", "1"], ["3 - Low", "3"]], "required": ["mandatory field"]},
+        "caller_id": {"label": "Caller", "type": "reference", "reference": "sys_user",
+                      "choices": [], "required": ["on the form"]},
+        "short_description": {"label": "Short description", "type": "string", "reference": "",
+                              "choices": [], "required": ["mandatory field"]},
+        "urgency": {"label": "Urgency", "type": "integer", "reference": "", "choices": [], "required": []},
+    }
+    EXPECTED = {"incident": {"table": "incident", "required": ["caller_id", "impact"], "fields": {
+        "_caller_id": "display value of a sys_user record", "caller_id": "",
+        "_impact": "one of: 1 - High | 3 - Low", "impact": ""}}}
+
+    def setUp(self):
+        super().setUp()
+        self.patch(sleet, "describe", lambda s, table: (self.FIELDS, []))
+
+    def test_json_for_a_json_config(self):
+        sleet.make_template(None, mock.Mock(template="incident"))
+        self.assertEqual(json.loads(self.out), self.EXPECTED)
+        self.assertIn('under "templates" in config.json', self.err)
+
+    @unittest.skipUnless(sleet.yaml, "needs PyYAML")
+    def test_yaml_for_a_yaml_config_ready_to_paste(self):
+        self.patch(sleet, "CONFIG_FILE", os.path.join(sleet.CONFIG_DIR, "config.yaml"))
+        sleet.make_template(None, mock.Mock(template="incident"))
+        self.assertTrue(self.out.startswith("  incident:\n"))
+        self.assertEqual(sleet.yaml.safe_load("templates:\n" + self.out), {"templates": self.EXPECTED})
+        self.assertIn('under "templates" in config.yaml', self.err)
+
+
+# --------------------------------------------------------------------------- #
 # cookie and token files
 # --------------------------------------------------------------------------- #
 
@@ -524,6 +629,14 @@ class BoardTest(ServerTestCase):
 
     def test_sections_file_replaces_the_board(self):
         self.write(sleet.SECTIONS_FILE, json.dumps([{"label": "Mine", "table": "incident", "query": "active=true"}]))
+        self.server.routes[("GET", "/api/now/table/incident")] = FakeResponse(result=TASKS[:1])
+        self.run_main("-j")
+        self.assertEqual([t["number"] for t in json.loads(self.out)["Mine"]], ["INC1"])
+
+    @unittest.skipUnless(sleet.yaml, "needs PyYAML")
+    def test_yaml_sections_file_replaces_the_board(self):
+        self.patch(sleet, "SECTIONS_FILE", os.path.join(sleet.CONFIG_DIR, "sections.yaml"))
+        self.write(sleet.SECTIONS_FILE, "- label: Mine\n  table: incident\n  query: 'active=true'  # a comment\n")
         self.server.routes[("GET", "/api/now/table/incident")] = FakeResponse(result=TASKS[:1])
         self.run_main("-j")
         self.assertEqual([t["number"] for t in json.loads(self.out)["Mine"]], ["INC1"])

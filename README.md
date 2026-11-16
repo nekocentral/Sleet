@@ -11,6 +11,7 @@ Sleet reads and updates ServiceNow tickets from your terminal. It uses the same 
 
 - macOS or Linux with Python 3.9 or later.
 - Optional: [fzf](https://github.com/junegunn/fzf) for the interactive picker, and `jq` for scripting with `-j`.
+- Optional: [PyYAML](https://pypi.org/project/PyYAML/), for a [YAML configuration](#yaml-instead-of-json).
 
 ## Install
 
@@ -32,6 +33,8 @@ Sleet reads and updates ServiceNow tickets from your terminal. It uses the same 
       -o ~/.config/sleet/config.json
     ```
 
+    To use YAML instead, see [YAML instead of JSON](#yaml-instead-of-json).
+
 3. Sign in to ServiceNow in your browser, and save your session cookie. On macOS with Chrome, Edge or Firefox:
 
     ```bash
@@ -46,7 +49,7 @@ When `sleet` reports that the session expired, repeat step 3.
 
 ### Install without pipx or uv
 
-Clone the repository and run the installer. It creates a private virtual environment, writes a `sleet` launcher to `~/bin` (or the directory you pass), and copies the example configuration if you don't have one yet:
+Clone the repository and run the installer. It creates a private virtual environment with `requests` and PyYAML, writes a `sleet` launcher to `~/bin` (or the directory you pass), and copies the example configuration if you don't have one yet:
 
 ```bash
 git clone https://github.com/nekocentral/sleet ~/src/sleet
@@ -160,10 +163,26 @@ All configuration lives in `~/.config/sleet/` (or `$XDG_CONFIG_HOME/sleet/`):
 
 | File | Purpose |
 | --- | --- |
-| `config.json` | Instance, presets, templates for `--new`, extra fields for the detail view |
+| `config.json` or `config.yaml` | Instance, presets, templates for `--new`, extra fields for the detail view |
 | `cookie` | Your session, written by `sleet --refresh-cookie` or by hand. Treat it as a password. |
 | `token` | The session token, cached by `sleet` so commands start faster. Treat it as a password. |
-| `sections.json` | Optional: custom board sections, one encoded query each |
+| `sections.json` or `sections.yaml` | Optional: custom board sections, one encoded query each |
+
+### YAML instead of JSON
+
+`config.yaml` and `sections.yaml` can replace the JSON files. They hold the same keys, and they allow `#` comments. YAML needs [PyYAML](https://pypi.org/project/PyYAML/), which Sleet doesn't install by default. The installer includes it. With pipx or uv:
+
+```bash
+pipx inject sleet pyyaml
+# or
+uv tool install --with pyyaml git+https://github.com/nekocentral/sleet
+```
+
+Start from `config.example.yaml` and `sections.example.yaml`.
+
+- When there is more than one, `config.yaml` comes before `config.yml`, which comes before `config.json`. The same goes for `sections`.
+- With a YAML configuration, `sleet --template` prints YAML, indented to paste under `templates:`.
+- Quote a display label that YAML reads as a boolean, such as `"Yes"`, `"No"`, `"On"` or `"Off"`. Unquoted, Sleet would send `true` or `false`.
 
 ### Templates
 
@@ -177,7 +196,7 @@ A template is the starting point for `--new NAME`. Generate one with `sleet --te
 
 ### Presets
 
-A preset is a named set of field values plus a notes field. `-r` and `--review` are shortcuts for the presets named `resolve` and `review`. See `config.example.json`:
+A preset is a named set of field values plus a notes field. `-r` and `--review` are shortcuts for the presets named `resolve` and `review`. See `config.example.json` or `config.example.yaml`:
 
 | Key | Meaning |
 | --- | --- |
@@ -200,13 +219,13 @@ Any `--set` in the same command overrides a preset value.
 
 ### Board sections
 
-Without `sections.json`, the board groups tickets by type. With it, every section runs its own encoded query, so you can mirror a team dashboard exactly. Start from `sections.example.json`. To copy a query from a ServiceNow list, right-click the last breadcrumb of its filter and select **Copy query**.
+Without a sections file, the board groups tickets by type. With it, every section runs its own encoded query, so you can mirror a team dashboard exactly. Start from `sections.example.json` or `sections.example.yaml`. To copy a query from a ServiceNow list, right-click the last breadcrumb of its filter and select **Copy query**.
 
 ### Environment variables
 
 | Variable | Effect |
 | --- | --- |
-| `SLEET_INSTANCE` | Overrides `instance` from `config.json` |
+| `SLEET_INSTANCE` | Overrides `instance` from the configuration file |
 | `SLEET_GCK` | Session token, if Sleet can't read it from the page (`g_ck` in the browser console) |
 | `XDG_CONFIG_HOME` | Moves the configuration folder |
 
@@ -215,7 +234,7 @@ Without `sections.json`, the board groups tickets by type. With it, every sectio
 - Keep `~/.config/sleet/cookie` private (`chmod 600`). Anyone who has it can act as you until the session expires.
 - `--refresh-cookie` reads only the cookies your browser would send to your instance, sends them only to your instance to check them, and writes the cookie file with `chmod 600`. Chrome and Edge also need access to the browser's key in your Keychain.
 - Writes go to production under your name. Don't use `-y` in scripts that touch many tickets.
-- Never commit `cookie`, `token`, `config.json` or `sections.json`. The `.gitignore` excludes them.
+- Never commit `cookie`, `token`, or your configuration and sections files, JSON or YAML. The `.gitignore` excludes them.
 - Ticket text is shown with control characters removed, so a ticket can't send escape sequences to your terminal. This also applies to `-j` output.
 
 ## License

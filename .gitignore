@@ -3,7 +3,11 @@ cookie
 .sn_cookie
 token
 config.json
+config.yaml
+config.yml
 sections.json
+sections.yaml
+sections.yml
 .venv/
 __pycache__/
 build/
