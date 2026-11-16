@@ -32,7 +32,7 @@ try:
 except ImportError:
     yaml = None
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 PLATFORM = sys.platform          # one place to ask which system this is (the tests switch it)
 FILE_MODES = os.name == "posix"  # Windows has no owner-only permission bits to check or set
