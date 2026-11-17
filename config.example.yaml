@@ -27,6 +27,16 @@ presets:
     hours_field: u_example_hours
     require_hours: false
 
+  close:
+    # sleet CHG... --close "close notes" --hours 1   (a standard change, closed in one step)
+    tables: [change_request]
+    fields:
+      state: Closed
+      close_code: Successful
+    notes_field: close_notes
+    hours_field: u_example_hours
+    require_hours: false
+
 templates:
   # sleet --new inc -t "title" [--desc ...] [--set ...]; values are display labels.
   # Generate one with: sleet --template incident

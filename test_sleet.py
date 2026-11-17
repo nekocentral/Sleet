@@ -796,6 +796,7 @@ class PresetTest(WriteTestCase):
         "resolve": {"tables": ["incident"], "fields": {"state": "Resolved", "close_code": "Solved"},
                     "required": ["close_code"]},
         "review": {"tables": ["change_request"], "fields": {"state": "Review"}},
+        "close": {"fields": {"state": "Closed", "close_code": "Successful"}, "hours_field": "u_hours"},
         "hours": {"fields": {"state": "Closed"}, "notes_field": "work_notes", "hours_field": "u_hours",
                   "require_hours": True},
     }
@@ -807,6 +808,11 @@ class PresetTest(WriteTestCase):
     def test_resolve_shortcut(self):
         self.run_main("INC1", "-r", "fixed", "-y")
         self.assertEqual(self.body(), {"state": "Resolved", "close_code": "Solved", "close_notes": "fixed"})
+
+    def test_close_shortcut(self):
+        self.run_main("INC1", "--close", "done", "--hours", "1", "-y")
+        self.assertEqual(self.body(), {"state": "Closed", "close_code": "Successful", "close_notes": "done",
+                                       "u_hours": "1"})
 
     def test_set_overrides_a_preset_value(self):
         self.run_main("INC1", "-r", "fixed", "--set", "close_code=Workaround", "-y")
@@ -1061,7 +1067,9 @@ class MainArgsTest(ServerTestCase):
         self.assertUsageError("write options need a ticket number", "-m", "x")
 
     def test_only_one_preset(self):
-        self.assertUsageError("use only one of --preset/--resolve/--review", "INC1", "-r", "a", "--review", "b")
+        self.assertUsageError("use only one of --preset/--resolve/--review/--close", "INC1", "-r", "a", "--review", "b")
+        self.assertUsageError("use only one of --preset/--resolve/--review/--close", "INC1", "--review", "a",
+                              "--close", "b")
 
     def test_only_one_stdin(self):
         self.assertUsageError("only one of --note/--comment/--desc/--preset can read stdin",

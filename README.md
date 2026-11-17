@@ -177,6 +177,7 @@ sleet INC0012345 --assign "Full Name"           # or a user name or email
 some_command | sleet INC0012345 -m -            # stdin into a work note
 sleet INC0012345 -r "Close notes"               # preset "resolve"
 sleet CHG0012345 --review "Close notes" --hours 4
+sleet CHG0012345 --close "Close notes" --hours 1  # preset "close", e.g. a standard change
 sleet INC0012345 -p mypreset "Notes"            # any preset from config.json
 ```
 
@@ -253,7 +254,7 @@ A template is the starting point for `--new NAME`. Generate one with `sleet --te
 
 ### Presets
 
-A preset is a named set of field values plus a notes field. `-r` and `--review` are shortcuts for the presets named `resolve` and `review`. See `config.example.json` or `config.example.yaml`:
+A preset is a named set of field values plus a notes field. `-r`, `--review` and `--close` are shortcuts for the presets named `resolve`, `review` and `close`. See `config.example.json` or `config.example.yaml`:
 
 | Key | Meaning |
 | --- | --- |

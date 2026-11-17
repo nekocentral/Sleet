@@ -1276,12 +1276,13 @@ def main():
                    help="apply a preset from config.json; NOTES goes to its notes field; '-' reads stdin")
     w.add_argument("-r", "--resolve", metavar="NOTES", help="shortcut for --preset resolve NOTES")
     w.add_argument("--review", metavar="NOTES", help="shortcut for --preset review NOTES")
+    w.add_argument("--close", metavar="NOTES", help="shortcut for --preset close NOTES")
     w.add_argument("--hours", type=int, metavar="N", help="hours worked, whole hours (field set in config)")
     w.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
     a = p.parse_args()
-    shortcuts = [("resolve", a.resolve), ("review", a.review)]
+    shortcuts = [("resolve", a.resolve), ("review", a.review), ("close", a.close)]
     if sum(v is not None for _, v in shortcuts) + (a.preset is not None) > 1:
-        p.error("use only one of --preset/--resolve/--review")
+        p.error("use only one of --preset/--resolve/--review/--close")
     for name, text in shortcuts:
         if text is not None:
             a.preset = [name, text]
