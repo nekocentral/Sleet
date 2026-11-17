@@ -28,7 +28,7 @@ presets:
     require_hours: false
 
   close:
-    # sleet CHG... --close "close notes" --hours 1   (a standard change, closed in one step)
+    # sleet CHG... --close "close notes" --hours 0.25   (a standard change, closed in one step)
     tables: [change_request]
     fields:
       state: Closed

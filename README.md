@@ -177,9 +177,11 @@ sleet INC0012345 --assign "Full Name"           # or a user name or email
 some_command | sleet INC0012345 -m -            # stdin into a work note
 sleet INC0012345 -r "Close notes"               # preset "resolve"
 sleet CHG0012345 --review "Close notes" --hours 4
-sleet CHG0012345 --close "Close notes" --hours 1  # preset "close", e.g. a standard change
+sleet CHG0012345 --close "Close notes" --hours 0.25  # preset "close", e.g. a standard change
 sleet INC0012345 -p mypreset "Notes"            # any preset from config.json
 ```
+
+`--hours` takes whole, half or quarter hours, written with a dot: `2`, `1.5`, `0.25`.
 
 ### Create tickets
 

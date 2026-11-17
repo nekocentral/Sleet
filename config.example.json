@@ -36,7 +36,7 @@
       "require_hours": false
     },
     "close": {
-      "_comment": "sleet CHG... --close \"close notes\" --hours 1   (a standard change, closed in one step)",
+      "_comment": "sleet CHG... --close \"close notes\" --hours 0.25   (a standard change, closed in one step)",
       "tables": [
         "change_request"
       ],

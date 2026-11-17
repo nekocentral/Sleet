@@ -830,6 +830,11 @@ class PresetTest(WriteTestCase):
         self.run_main("INC1", "-p", "hours", "notes", "--hours", "3", "-y")
         self.assertEqual(self.body(), {"state": "Closed", "work_notes": "notes", "u_hours": "3"})
 
+    def test_quarter_and_half_hours(self):
+        for given, sent in [("0.25", "0.25"), ("0.5", "0.5"), ("1.50", "1.5"), ("2.0", "2"), ("0", "0")]:
+            self.run_main("INC1", "-p", "hours", "notes", "--hours", given, "-y")
+            self.assertEqual(self.server.api_calls("PATCH")[-1]["json"]["u_hours"], sent)
+
     def test_require_hours(self):
         self.assertDies("preset 'hours' needs --hours N", self.run_main, "INC1", "-p", "hours", "x", "-y")
 
@@ -1070,6 +1075,10 @@ class MainArgsTest(ServerTestCase):
         self.assertUsageError("use only one of --preset/--resolve/--review/--close", "INC1", "-r", "a", "--review", "b")
         self.assertUsageError("use only one of --preset/--resolve/--review/--close", "INC1", "--review", "a",
                               "--close", "b")
+
+    def test_hours_in_quarter_steps_with_a_dot(self):
+        for bad in ["0.3", "1,5", "-1", "1.", "x"]:
+            self.assertUsageError("is not whole, half or quarter hours with a dot", "INC1", "--hours", bad)
 
     def test_only_one_stdin(self):
         self.assertUsageError("only one of --note/--comment/--desc/--preset can read stdin",
