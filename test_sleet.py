@@ -796,6 +796,7 @@ class PresetTest(WriteTestCase):
         "resolve": {"tables": ["incident"], "fields": {"state": "Resolved", "close_code": "Solved"},
                     "required": ["close_code"]},
         "review": {"tables": ["change_request"], "fields": {"state": "Review"}},
+        "close": {"fields": {"state": "Closed", "close_code": "Successful"}, "hours_field": "u_hours"},
         "hours": {"fields": {"state": "Closed"}, "notes_field": "work_notes", "hours_field": "u_hours",
                   "require_hours": True},
     }
@@ -807,6 +808,11 @@ class PresetTest(WriteTestCase):
     def test_resolve_shortcut(self):
         self.run_main("INC1", "-r", "fixed", "-y")
         self.assertEqual(self.body(), {"state": "Resolved", "close_code": "Solved", "close_notes": "fixed"})
+
+    def test_close_shortcut(self):
+        self.run_main("INC1", "--close", "done", "--hours", "1", "-y")
+        self.assertEqual(self.body(), {"state": "Closed", "close_code": "Successful", "close_notes": "done",
+                                       "u_hours": "1"})
 
     def test_set_overrides_a_preset_value(self):
         self.run_main("INC1", "-r", "fixed", "--set", "close_code=Workaround", "-y")
@@ -823,6 +829,11 @@ class PresetTest(WriteTestCase):
     def test_hours_go_to_the_preset_field(self):
         self.run_main("INC1", "-p", "hours", "notes", "--hours", "3", "-y")
         self.assertEqual(self.body(), {"state": "Closed", "work_notes": "notes", "u_hours": "3"})
+
+    def test_quarter_and_half_hours(self):
+        for given, sent in [("0.25", "0.25"), ("0.5", "0.5"), ("1.50", "1.5"), ("2.0", "2"), ("0", "0")]:
+            self.run_main("INC1", "-p", "hours", "notes", "--hours", given, "-y")
+            self.assertEqual(self.server.api_calls("PATCH")[-1]["json"]["u_hours"], sent)
 
     def test_require_hours(self):
         self.assertDies("preset 'hours' needs --hours N", self.run_main, "INC1", "-p", "hours", "x", "-y")
@@ -1061,7 +1072,13 @@ class MainArgsTest(ServerTestCase):
         self.assertUsageError("write options need a ticket number", "-m", "x")
 
     def test_only_one_preset(self):
-        self.assertUsageError("use only one of --preset/--resolve/--review", "INC1", "-r", "a", "--review", "b")
+        self.assertUsageError("use only one of --preset/--resolve/--review/--close", "INC1", "-r", "a", "--review", "b")
+        self.assertUsageError("use only one of --preset/--resolve/--review/--close", "INC1", "--review", "a",
+                              "--close", "b")
+
+    def test_hours_in_quarter_steps_with_a_dot(self):
+        for bad in ["0.3", "1,5", "-1", "1.", "x"]:
+            self.assertUsageError("is not whole, half or quarter hours with a dot", "INC1", "--hours", bad)
 
     def test_only_one_stdin(self):
         self.assertUsageError("only one of --note/--comment/--desc/--preset can read stdin",

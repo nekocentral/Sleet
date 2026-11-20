@@ -1143,6 +1143,13 @@ def make_template(s, a):
         print(f"[sleet] note: {n}", file=sys.stderr)
 
 
+def hours(text):
+    """--hours in quarter-hour steps, with a dot: 1, 0.5, 1.25. A comma would be read as a thousands separator."""
+    if not re.fullmatch(r"\d+(\.\d+)?", text) or float(text) * 4 != int(float(text) * 4):
+        raise argparse.ArgumentTypeError(f"'{text}' is not whole, half or quarter hours with a dot, e.g. 1, 0.5 or 1.25")
+    return f"{float(text):.2f}".rstrip("0").rstrip(".")     # 1.50 -> 1.5, 2.00 -> 2
+
+
 def writing(a):
     return any([a.note, a.comment, a.set, a.assign, a.preset, a.hours is not None])
 
@@ -1165,7 +1172,7 @@ def update(s, a, table, sys_id, num):
         hours_field = preset.get("hours_field") or CFG.get("hours_field")
         if not hours_field:
             die("--hours needs 'hours_field' in the preset or in config.json")
-        body[hours_field] = str(a.hours)
+        body[hours_field] = a.hours
     common_fields(s, a, body)
     if not any(v.strip() for v in body.values()):
         die("nothing to write (empty text?)")
@@ -1276,12 +1283,14 @@ def main():
                    help="apply a preset from config.json; NOTES goes to its notes field; '-' reads stdin")
     w.add_argument("-r", "--resolve", metavar="NOTES", help="shortcut for --preset resolve NOTES")
     w.add_argument("--review", metavar="NOTES", help="shortcut for --preset review NOTES")
-    w.add_argument("--hours", type=int, metavar="N", help="hours worked, whole hours (field set in config)")
+    w.add_argument("--close", metavar="NOTES", help="shortcut for --preset close NOTES")
+    w.add_argument("--hours", type=hours, metavar="N",
+                   help="hours worked in quarter hours with a dot, e.g. 1.5 or 0.25 (field set in config)")
     w.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
     a = p.parse_args()
-    shortcuts = [("resolve", a.resolve), ("review", a.review)]
+    shortcuts = [("resolve", a.resolve), ("review", a.review), ("close", a.close)]
     if sum(v is not None for _, v in shortcuts) + (a.preset is not None) > 1:
-        p.error("use only one of --preset/--resolve/--review")
+        p.error("use only one of --preset/--resolve/--review/--close")
     for name, text in shortcuts:
         if text is not None:
             a.preset = [name, text]
